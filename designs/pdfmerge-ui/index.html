@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Merge - 合并 PDF 文件</title>
+    <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+    <style>
+        :root {
+            --bg-primary: #fafafa;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f5f5f7;
+            --text-primary: #1d1d1f;
+            --text-secondary: #6e6e73;
+            --text-tertiary: #86868b;
+            --accent: #0071e3;
+            --accent-hover: #0077ed;
+            --accent-light: rgba(0, 113, 227, 0.08);
+            --border: #d2d2d7;
+            --border-light: #e8e8ed;
+            --success: #34c759;
+            --error: #ff3b30;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.06);
+            --shadow-lg: 0 8px 30px rgba(0,0,0,0.08);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --font-sans: -apple-system, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+            --transition: 0.2s ease;
+        }
+
+        [data-theme="dark"] {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #242424;
+            --bg-tertiary: #2c2c2e;
+            --text-primary: #f5f5f7;
+            --text-secondary: #a1a1a6;
+            --text-tertiary: #6e6e73;
+            --accent: #0a84ff;
+            --accent-hover: #409cff;
+            --accent-light: rgba(10, 132, 255, 0.12);
+            --border: #3a3a3c;
+            --border-light: #2c2c2e;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.3);
+            --shadow-lg: 0 8px 30px rgba(0,0,0,0.4);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        .app-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 16px;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            gap: 24px;
+            align-items: start;
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border-light);
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .card-header h2 {
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        .card-body {
+            padding: 24px;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            padding: 16px 24px;
+            background: var(--bg-tertiary);
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: var(--radius-sm);
+            border: none;
+            cursor: pointer;
+            transition: all var(--transition);
+            font-family: var(--font-sans);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .btn-secondary {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+        }
+
+        .btn-ghost:hover {
+            background: var(--accent-light);
+            color: var(--accent);
+        }
+
+        .btn-icon {
+            padding: 10px;
+            min-width: 40px;
+            justify-content: center;
+        }
+
+        .file-list {
+            list-style: none;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border-light);
+            transition: background var(--transition);
+            cursor: pointer;
+        }
+
+        .file-item:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .file-item.selected {
+            background: var(--accent-light);
+        }
+
+        .file-icon {
+            width: 44px;
+            height: 52px;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            flex-shrink: 0;
+        }
+
+        .file-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-size: 15px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+
+        .file-meta {
+            font-size: 13px;
+            color: var(--text-tertiary);
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+
+        .file-item:hover .file-actions {
+            opacity: 1;
+        }
+
+        .drag-handle {
+            color: var(--text-tertiary);
+            cursor: grab;
+            opacity: 0;
+            transition: opacity var(--transition);
+        }
+
+        .file-item:hover .drag-handle {
+            opacity: 1;
+        }
+
+        .empty-state {
+            padding: 60px 24px;
+            text-align: center;
+        }
+
+        .empty-state-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 20px;
+            background: var(--bg-tertiary);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .empty-state-icon svg {
+            width: 36px;
+            height: 36px;
+            color: var(--text-tertiary);
+        }
+
+        .empty-state h3 {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .empty-state p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .preview-area {
+            aspect-ratio: 3/4;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-md);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 2px dashed var(--border);
+            transition: all var(--transition);
+        }
+
+        .preview-area.has-preview {
+            border: none;
+            background: var(--bg-primary);
+        }
+
+        .preview-placeholder {
+            text-align: center;
+            color: var(--text-tertiary);
+        }
+
+        .preview-placeholder svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+
+        .preview-placeholder p {
+            font-size: 14px;
+        }
+
+        .settings-group {
+            margin-bottom: 20px;
+        }
+
+        .settings-group:last-child {
+            margin-bottom: 0;
+        }
+
+        .settings-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .input {
+            flex: 1;
+            padding: 12px 16px;
+            font-size: 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            transition: all var(--transition);
+        }
+
+        .input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-light);
+        }
+
+        .progress-container {
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .progress-text {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-fill.success {
+            background: var(--success);
+        }
+
+        .status-message {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            margin-top: 12px;
+        }
+
+        .status-message.success {
+            background: rgba(52, 199, 89, 0.1);
+            color: var(--success);
+        }
+
+        .status-message.error {
+            background: rgba(255, 59, 48, 0.1);
+            color: var(--error);
+        }
+
+        .theme-toggle {
+            position: fixed;
+            top: 24px;
+            right: 24px;
+            z-index: 100;
+        }
+
+        .drop-zone {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 113, 227, 0.1);
+            border: 3px dashed var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--transition);
+        }
+
+        .drop-zone.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .drop-zone-content {
+            text-align: center;
+            color: var(--accent);
+        }
+
+        .drop-zone-content svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+        }
+
+        .drop-zone-content h3 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .drop-zone-content p {
+            font-size: 14px;
+            opacity: 0.8;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease forwards;
+        }
+
+        @media (max-width: 900px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useCallback, useRef, useEffect } = React;
+
+        const FileIcon = () => (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+                <polyline points="10 9 9 9 8 9"/>
+            </svg>
+        );
+
+        const PlusIcon = () => (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+        );
+
+        const TrashIcon = () => (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+        );
+
+        const ChevronUpIcon = () => (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="18 15 12 9 6 15"/>
+            </svg>
+        );
+
+        const ChevronDownIcon = () => (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="6 9 12 15 18 9"/>
+            </svg>
+        );
+
+        const SunIcon = () => (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="5"/>
+                <line x1="12" y1="1" x2="12" y2="3"/>
+                <line x1="12" y1="21" x2="12" y2="23"/>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                <line x1="1" y1="12" x2="3" y2="12"/>
+                <line x1="21" y1="12" x2="23" y2="12"/>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+        );
+
+        const MoonIcon = () => (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+        );
+
+        const MergeIcon = () => (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M8 6h13"/>
+                <path d="M8 12h13"/>
+                <path d="M8 18h13"/>
+                <path d="M3 6h.01"/>
+                <path d="M3 12h.01"/>
+                <path d="M3 18h.01"/>
+            </svg>
+        );
+
+        const FolderIcon = () => (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+        );
+
+        const formatFileSize = (bytes) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        };
+
+        const mockFiles = [
+            { id: 1, name: '发票_2024_001.pdf', size: 245760, pages: 2 },
+            { id: 2, name: '发票_2024_002.pdf', size: 189440, pages: 1 },
+            { id: 3, name: '发票_2024_003.pdf', size: 312320, pages: 3 },
+        ];
+
+        const App = () => {
+            const [files, setFiles] = useState(mockFiles);
+            const [selectedId, setSelectedId] = useState(1);
+            const [theme, setTheme] = useState('light');
+            const [isDragging, setIsDragging] = useState(false);
+            const [outputName, setOutputName] = useState('合并发票_2024.pdf');
+            const [outputDir, setOutputDir] = useState('/Users/admin/Documents');
+            const [isMerging, setIsMerging] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [status, setStatus] = useState(null);
+            const dragCounter = useRef(0);
+
+            useEffect(() => {
+                document.documentElement.setAttribute('data-theme', theme);
+            }, [theme]);
+
+            const handleDragEnter = (e) => {
+                e.preventDefault();
+                dragCounter.current++;
+                if (e.dataTransfer.types.includes('Files')) {
+                    setIsDragging(true);
+                }
+            };
+
+            const handleDragLeave = (e) => {
+                e.preventDefault();
+                dragCounter.current--;
+                if (dragCounter.current === 0) {
+                    setIsDragging(false);
+                }
+            };
+
+            const handleDragOver = (e) => {
+                e.preventDefault();
+            };
+
+            const handleDrop = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                dragCounter.current = 0;
+                // Mock adding files
+            };
+
+            const moveFile = (id, direction) => {
+                const index = files.findIndex(f => f.id === id);
+                if (index === -1) return;
+                const newIndex = direction === 'up' ? index - 1 : index + 1;
+                if (newIndex < 0 || newIndex >= files.length) return;
+                const newFiles = [...files];
+                [newFiles[index], newFiles[newIndex]] = [newFiles[newIndex], newFiles[index]];
+                setFiles(newFiles);
+            };
+
+            const removeFile = (id) => {
+                setFiles(files.filter(f => f.id !== id));
+                if (selectedId === id) {
+                    setSelectedId(files.length > 1 ? files.find(f => f.id !== id)?.id : null);
+                }
+            };
+
+            const handleMerge = () => {
+                if (files.length < 2) {
+                    setStatus({ type: 'error', text: '请至少添加 2 个 PDF 文件' });
+                    return;
+                }
+                setIsMerging(true);
+                setProgress(0);
+                setStatus(null);
+
+                const interval = setInterval(() => {
+                    setProgress(p => {
+                        if (p >= 100) {
+                            clearInterval(interval);
+                            setIsMerging(false);
+                            setStatus({ type: 'success', text: `成功合并 ${files.length} 个文件 → ${outputName}` });
+                            return 100;
+                        }
+                        return p + 10;
+                    });
+                }, 200);
+            };
+
+            const selectedFile = files.find(f => f.id === selectedId);
+
+            return (
+                <div 
+                    className="app-container"
+                    onDragEnter={handleDragEnter}
+                    onDragLeave={handleDragLeave}
+                    onDragOver={handleDragOver}
+                    onDrop={handleDrop}
+                >
+                    <div className={`drop-zone ${isDragging ? 'active' : ''}`}>
+                        <div className="drop-zone-content">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            <h3>拖放 PDF 文件到此处</h3>
+                            <p>释放以添加文件到合并列表</p>
+                        </div>
+                    </div>
+
+                    <div className="theme-toggle">
+                        <button 
+                            className="btn btn-secondary btn-icon"
+                            onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
+                            title={theme === 'light' ? '切换到深色模式' : '切换到浅色模式'}
+                        >
+                            {theme === 'light' ? <MoonIcon /> : <SunIcon />}
+                        </button>
+                    </div>
+
+                    <header className="header">
+                        <h1>PDF Merge</h1>
+                        <p>轻松合并多个 PDF 文件为一个</p>
+                    </header>
+
+                    <div className="main-content">
+                        <div className="card">
+                            <div className="toolbar">
+                                <button className="btn btn-primary">
+                                    <PlusIcon /> 添加文件
+                                </button>
+                                <button 
+                                    className="btn btn-ghost"
+                                    onClick={() => setFiles([])}
+                                >
+                                    清空列表
+                                </button>
+                            </div>
+
+                            {files.length === 0 ? (
+                                <div className="empty-state">
+                                    <div className="empty-state-icon">
+                                        <FileIcon />
+                                    </div>
+                                    <h3>还没有添加文件</h3>
+                                    <p>点击"添加文件"按钮或拖放 PDF 文件到此处</p>
+                                    <button className="btn btn-primary">
+                                        <PlusIcon /> 选择 PDF 文件
+                                    </button>
+                                </div>
+                            ) : (
+                                <ul className="file-list">
+                                    {files.map((file, index) => (
+                                        <li 
+                                            key={file.id}
+                                            className={`file-item ${selectedId === file.id ? 'selected' : ''}`}
+                                            onClick={() => setSelectedId(file.id)}
+                                        >
+                                            <span className="drag-handle">
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                    <circle cx="9" cy="6" r="1.5"/>
+                                                    <circle cx="15" cy="6" r="1.5"/>
+                                                    <circle cx="9" cy="12" r="1.5"/>
+                                                    <circle cx="15" cy="12" r="1.5"/>
+                                                    <circle cx="9" cy="18" r="1.5"/>
+                                                    <circle cx="15" cy="18" r="1.5"/>
+                                                </svg>
+                                            </span>
+                                            <div className="file-icon">PDF</div>
+                                            <div className="file-info">
+                                                <div className="file-name">{file.name}</div>
+                                                <div className="file-meta">
+                                                    {formatFileSize(file.size)} · {file.pages} 页
+                                                </div>
+                                            </div>
+                                            <div className="file-actions">
+                                                <button 
+                                                    className="btn btn-ghost btn-icon"
+                                                    onClick={(e) => { e.stopPropagation(); moveFile(file.id, 'up'); }}
+                                                    disabled={index === 0}
+                                                    title="上移"
+                                                >
+                                                    <ChevronUpIcon />
+                                                </button>
+                                                <button 
+                                                    className="btn btn-ghost btn-icon"
+                                                    onClick={(e) => { e.stopPropagation(); moveFile(file.id, 'down'); }}
+                                                    disabled={index === files.length - 1}
+                                                    title="下移"
+                                                >
+                                                    <ChevronDownIcon />
+                                                </button>
+                                                <button 
+                                                    className="btn btn-ghost btn-icon"
+                                                    onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                                                    title="删除"
+                                                >
+                                                    <TrashIcon />
+                                                </button>
+                                            </div>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                            <div className="card">
+                                <div className="card-header">
+                                    <h2>预览</h2>
+                                </div>
+                                <div className="card-body">
+                                    <div className={`preview-area ${selectedFile ? 'has-preview' : ''}`}>
+                                        {selectedFile ? (
+                                            <div style={{ 
+                                                width: '100%', 
+                                                height: '100%', 
+                                                background: 'white',
+                                                borderRadius: '8px',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                color: 'var(--text-tertiary)'
+                                            }}>
+                                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '12px', opacity: 0.3 }}>
+                                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                                    <polyline points="14 2 14 8 20 8"/>
+                                                </svg>
+                                                <span style={{ fontSize: '14px' }}>{selectedFile.name}</span>
+                                                <span style={{ fontSize: '12px', marginTop: '4px' }}>第 1 页 / 共 {selectedFile.pages} 页</span>
+                                            </div>
+                                        ) : (
+                                            <div className="preview-placeholder">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                                                    <polyline points="21 15 16 10 5 21"/>
+                                                </svg>
+                                                <p>选择文件以预览</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="card">
+                                <div className="card-header">
+                                    <h2>输出设置</h2>
+                                </div>
+                                <div className="card-body">
+                                    <div className="settings-group">
+                                        <label className="settings-label">文件名</label>
+                                        <input 
+                                            type="text" 
+                                            className="input"
+                                            value={outputName}
+                                            onChange={(e) => setOutputName(e.target.value)}
+                                        />
+                                    </div>
+                                    <div className="settings-group">
+                                        <label className="settings-label">保存位置</label>
+                                        <div className="input-group">
+                                            <input 
+                                                type="text" 
+                                                className="input"
+                                                value={outputDir}
+                                                onChange={(e) => setOutputDir(e.target.value)}
+                                            />
+                                            <button className="btn btn-secondary">
+                                                <FolderIcon />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <button 
+                                        className="btn btn-primary"
+                                        style={{ width: '100%', marginTop: '20px', padding: '14px' }}
+                                        onClick={handleMerge}
+                                        disabled={isMerging || files.length < 2}
+                                    >
+                                        <MergeIcon />
+                                        {isMerging ? '合并中...' : '合并 PDF'}
+                                    </button>
+
+                                    {isMerging && (
+                                        <div className="progress-container">
+                                            <div className="progress-header">
+                                                <span className="progress-text">正在合并...</span>
+                                                <span className="progress-text">{progress}%</span>
+                                            </div>
+                                            <div className="progress-bar">
+                                                <div 
+                                                    className="progress-fill"
+                                                    style={{ width: `${progress}%` }}
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {status && (
+                                        <div className={`status-message ${status.type}`}>
+                                            {status.type === 'success' ? '✓' : '✕'} {status.text}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

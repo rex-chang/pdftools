@@ -1,0 +1,9 @@
+pdfmerge
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+.DS_Store
+*.swp
+*.swo
