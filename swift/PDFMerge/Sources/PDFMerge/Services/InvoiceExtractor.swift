@@ -335,7 +335,14 @@ enum InvoiceExtractor {
                 typeCandidate = t
             }
             // Identify the 合计 line (not 价税合计).
-            if line.compact.contains("合计") && !line.compact.contains("价税合计") {
+            //
+            // "合" and "计" can be split across the 金额 and 税额 column
+            // headers — e.g. "2000.00 不征税 合 ¥2000.00 计 ¥0.00" — so a
+            // naive "contains 合计" misses it. Match if both chars appear on
+            // the line, but exclude the 价税合计 label line.
+            if !line.compact.contains("价税合计"),
+               line.compact.range(of: "合.*计", options: .regularExpression) != nil
+                || line.compact.contains("合计") {
                 if totalLineIdx == nil { totalLineIdx = i }
             }
         }

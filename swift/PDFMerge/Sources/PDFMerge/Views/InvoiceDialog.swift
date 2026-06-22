@@ -95,20 +95,22 @@ struct InvoiceDialog: View {
 
     private var summaryBar: some View {
         let s = summary
-        return HStack(spacing: 12) {
+        // Build the trailing count label as a single string so the "张"
+        // sits flush against the number and the closing bracket — putting
+        // them in separate HStack children would inject the stack's spacing
+        // between every glyph.
+        let countText = s.skipped > 0
+            ? "（\(s.counted) 张 · \(s.skipped) 张失败）"
+            : "（\(s.counted) 张）"
+        return HStack(spacing: 8) {
             Text("价税合计汇总")
                 .font(.caption).foregroundStyle(.secondary)
             Text(String(format: "¥%.2f", s.total))
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.accentColor)
-            Text("（\(s.counted) 张")
-                .font(.caption).foregroundStyle(.secondary)
-            if s.skipped > 0 {
-                Text("· \(s.skipped) 张失败）")
-                    .font(.caption).foregroundStyle(.orange)
-            } else {
-                Text("）").font(.caption).foregroundStyle(.secondary)
-            }
+            Text(countText)
+                .font(.caption)
+                .foregroundStyle(s.skipped > 0 ? .orange : .secondary)
             Spacer()
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
