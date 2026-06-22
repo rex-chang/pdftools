@@ -44,6 +44,23 @@ struct FileQueueView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        // fileImporter must hang on a stable root view (not a rebuilt child
+        // like `toolbar`); otherwise the open-folder state change may not
+        // surface a dialog on macOS.
+        .fileImporter(isPresented: $isShowingOpenDialog,
+                      allowedContentTypes: [UTType.pdf],
+                      allowsMultipleSelection: true) { result in
+            if case let .success(urls) = result {
+                state.addFiles(urls.map(\.path))
+            }
+        }
+        .fileImporter(isPresented: $isShowingFolderDialog,
+                      allowedContentTypes: [UTType.folder],
+                      allowsMultipleSelection: false) { result in
+            if case let .success(urls) = result, let url = urls.first {
+                addPDFsFromFolder(url.path)
+            }
+        }
     }
 
     // MARK: Toolbar
@@ -79,20 +96,6 @@ struct FileQueueView: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .buttonStyle(.bordered)
-        .fileImporter(isPresented: $isShowingOpenDialog,
-                      allowedContentTypes: [UTType.pdf],
-                      allowsMultipleSelection: true) { result in
-            if case let .success(urls) = result {
-                state.addFiles(urls.map(\.path))
-            }
-        }
-        .fileImporter(isPresented: $isShowingFolderDialog,
-                      allowedContentTypes: [UTType.folder],
-                      allowsMultipleSelection: false) { result in
-            if case let .success(urls) = result, let url = urls.first {
-                addPDFsFromFolder(url.path)
-            }
-        }
     }
 
     @State private var isShowingOpenDialog = false

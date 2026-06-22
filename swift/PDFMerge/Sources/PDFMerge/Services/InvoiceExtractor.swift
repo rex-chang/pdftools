@@ -6,9 +6,9 @@ struct InvoiceData: Identifiable {
     let id = UUID()
     let fileName: String
     var type: String = ""
-    var totalWithTax: String = ""
-    var totalBefore: String = ""
-    var taxAmount: String = ""
+    var totalWithTax: String = ""   // 价税合计
+    var totalBefore: String = ""    // 金额(不含税)
+    var taxAmount: String = ""      // 税额
 
     var isEmpty: Bool {
         totalWithTax.isEmpty && totalBefore.isEmpty && taxAmount.isEmpty
@@ -21,218 +21,496 @@ struct InvoiceData: Identifiable {
     }
 }
 
-/// Extract invoice price/tax info from PDFs.
+/// Extract invoice price/tax info from Chinese electronic invoices (电子发票).
 ///
-/// Port of Go `pdf/invoice.go`. The Go version used `ledongthuc/pdf`'s
-/// `GetStyledTexts()` which returns text blocks with (X, Y) coordinates.
-/// PDFKit exposes per-word selections with `bounds(for:)` instead, so we
-/// enumerate words and group them into lines by `minY` (tolerance 2pt),
-/// matching the Go algorithm. PDFKit's coordinate origin is the top-left
-/// (flipped), the same convention ledongthuc uses, so line ordering is
-/// consistent.
+/// Strategy: these invoices share a stable layout — a table with columns
+/// 金额 / 税额, a 合计 row summing them, and a 价税合计 line giving the
+/// grand total. The exact placement varies by template (keyword and amount
+/// may share a line, or the amount may sit on an adjacent line; ¥ and the
+/// digits may be separate fragments). So we:
+///
+/// 1. Tokenise every character via `PDFPage.characterBounds(at:)` and group
+///    into words, carrying (x, y) for each.
+/// 2. Merge stray "¥" tokens with the digits that follow them on the same
+///    line, so "¥" + "2000.00" becomes a single "¥2000.00" token.
+/// 3. Group tokens into lines by Y (tolerance 3pt).
+/// 4. Anchor on keywords:
+///    - 合计 (but NOT 价税合计): the line's ¥-amounts → [金额, 税额].
+///      If the keyword line has no amounts, scan the immediately adjacent
+///      line (the one below it in reading order).
+///    - 价税合计: take the ¥-amount from the keyword line, or the adjacent
+///      line in reading order.
+/// 5. Type: the *star-wrapped* goods name(s) on the line above 合计.
+///
+/// Coordinate convention: PDFKit's characterBounds origin is the BOTTOM-LEFT
+/// of the page, so "reading order" (top-to-bottom) corresponds to DECREASING
+/// `minY`... but in practice the bounds returned here are in the flipped
+/// (top-left origin) space, so we sort lines by DESCENDING y for reading
+/// order. We empirically verify orientation by checking that the title
+/// ("电子发票") lands on the last line.
 enum InvoiceExtractor {
 
-    /// Extract from a single PDF.
     static func extract(at path: String) -> InvoiceData? {
         guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else { return nil }
-        var blocks = collectBlocks(doc)
-        var inv = InvoiceData(fileName: (path as NSString).lastPathComponent)
-        parse(blocks: &blocks, into: &inv)
+        var lines = buildLines(doc)
+        if !lines.isEmpty {
+            // Orient: ensure lines are sorted top-to-bottom in reading order.
+            // Empirically characterBounds returns flipped coords (origin top-left),
+            // so larger y = lower on page → reading order is descending y.
+            // Detect by checking which end the title sits on; flip if needed.
+            if needsFlip(lines) { lines.reverse() }
+
+            var inv = InvoiceData(fileName: (path as NSString).lastPathComponent)
+            parse(lines: lines, into: &inv)
+            // Only accept the text-layer result if it actually found the key
+            // amounts. If 价税合计 is empty the text layer is unusable
+            // (corrupted/unreadable) — fall through to OCR.
+            if !inv.totalWithTax.isEmpty {
+                return inv
+            }
+        }
+
+        // Fallback: OCR (slow, but rescues PDFs with broken/inverted text).
+        return extractFromOCR(doc: doc, fileName: (path as NSString).lastPathComponent)
+    }
+
+    /// Build lines from OCR tokens and parse them. Coordinate handling: OCR
+    /// gives normalised (0..1) bottom-left origin; we convert to the same
+    /// "y descends top-to-bottom" reading order the text-layer path uses,
+    /// then reuse `parse`.
+    private static func extractFromOCR(doc: PDFDocument, fileName: String) -> InvoiceData? {
+        guard let ocrTokens = InvoiceOCR.recognise(doc: doc) else { return nil }
+
+        // Convert to internal Token. Vision's boundingBox uses bottom-left
+        // origin, so reading order (top first) = DESCENDING normY; keep that
+        // as our y by using (1 - normY) so larger y = lower on page.
+        //
+        // No ¥-token merging needed here: Vision already emits "¥2000.00"
+        // as a single token (unlike the text-layer path, where ¥ and the
+        // digits can be separate fragments).
+        let tokens: [Token] = ocrTokens.map {
+            Token(x: $0.normX, y: 1.0 - $0.normY, s: $0.s)
+        }
+        var sortedTokens = tokens
+
+        // Group into lines by y (tolerance 0.015 in normalised space ≈ 3pt
+        // on a typical invoice height).
+        sortedTokens.sort { (a: Token, b: Token) -> Bool in
+            if abs(a.y - b.y) > 0.015 { return a.y > b.y }
+            return a.x < b.x
+        }
+        var lines: [Line] = []
+        var cur = Line(y: 0, tokens: [])
+        for t in sortedTokens {
+            if cur.tokens.isEmpty || abs(t.y - cur.y) <= 0.015 {
+                if cur.tokens.isEmpty { cur.y = t.y }
+                cur.tokens.append(t)
+            } else {
+                cur.tokens.sort { $0.x < $1.x }
+                lines.append(cur)
+                cur = Line(y: t.y, tokens: [t])
+            }
+        }
+        if !cur.tokens.isEmpty {
+            cur.tokens.sort { $0.x < $1.x }
+            lines.append(cur)
+        }
+        guard !lines.isEmpty else { return nil }
+
+        var inv = InvoiceData(fileName: fileName)
+        parse(lines: lines, into: &inv)
         return inv
     }
 
-    /// Extract from many PDFs, always returning one row per input
-    /// (failures surface as a row whose totalWithTax carries the error).
-    static func extractAll(paths: [String]) -> [InvoiceData] {
-        paths.map { p in
-            if let inv = extract(at: p) {
-                return inv
-            }
-            var fail = InvoiceData(fileName: (p as NSString).lastPathComponent)
-            fail.totalWithTax = "失败: 无法读取"
-            return fail
+    /// DEBUG: dump the reconstructed lines + extraction result. For dev use.
+    static func debugExtract(at path: String) {
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else {
+            print("nil doc"); return
         }
+        var lines = buildLines(doc)
+        if needsFlip(lines) { lines.reverse() }
+        print("lines (\(lines.count)):")
+        for (i, l) in lines.enumerated() {
+            print("  L\(i) y=\(String(format: "%.1f", l.y)) [\(l.text)]")
+            for t in l.tokens {
+                print("      x=\(String(format: "%.1f", t.x)) «\(t.s)»")
+            }
+        }
+        var inv = InvoiceData(fileName: (path as NSString).lastPathComponent)
+        parse(lines: lines, into: &inv)
+        print("→ type=\(inv.type) totalWithTax=\(inv.totalWithTax) before=\(inv.totalBefore) tax=\(inv.taxAmount)")
     }
 
-    /// Raw plain text of a PDF (for the "原始文本" debug view).
+    static func extractAll(paths: [String]) -> [InvoiceData] {
+        extractAll(paths: paths, progress: nil)
+    }
+
+    /// Extract from all paths, calling `progress` (on an arbitrary queue)
+    /// after each file completes with (doneCount, totalCount, currentFileName).
+    /// The progress callback lets the UI show "提取中 3/12" while OCR grinds
+    /// through a stack of broken PDFs.
+    static func extractAll(paths: [String],
+                           progress: ((Int, Int, String) -> Void)?) -> [InvoiceData] {
+        var results: [InvoiceData] = []
+        let total = paths.count
+        for (i, p) in paths.enumerated() {
+            let name = (p as NSString).lastPathComponent
+            if let inv = extract(at: p) {
+                results.append(inv)
+            } else {
+                var fail = InvoiceData(fileName: name)
+                fail.totalWithTax = "失败: 无法读取"
+                results.append(fail)
+            }
+            progress?(i + 1, total, name)
+        }
+        return results
+    }
+
+
     static func debugText(at path: String) -> String {
         guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else { return "" }
         return (0..<doc.pageCount).compactMap { doc.page(at: $0)?.string }.joined(separator: "\n")
     }
 
-    // MARK: - Internals
+    // MARK: - Tokenising
 
-    /// A positioned text fragment, matching Go's `pdf.Text{X, Y, S}`.
-    private struct Block {
+    private struct Token {
         let x: CGFloat
         let y: CGFloat
-        let s: String
+        var s: String
+    }
+    private struct Line {
+        var y: CGFloat
+        var tokens: [Token]
+        /// Concatenated text (no spaces between tokens).
+        var text: String { tokens.map(\.s).joined() }
+        /// Text with spaces collapsed.
+        var compact: String { text.replacingOccurrences(of: " ", with: "") }
     }
 
-    /// Collect (x, y, string) for every word across all pages.
-    ///
-    /// Implementation note: `PDFSelection.enumerateWords(_:)` is documented
-    /// but unreliable across SDKs, so we iterate per-character ranges via
-    /// `PDFPage.characterBounds(at:)` / `selection(from:to:)` and group
-    /// consecutive characters into "words" using the whitespace in the
-    /// page's plain text. Y is normalised across pages by accumulating page
-    /// heights, so a multi-page invoice groups lines the same way a single
-    /// page does.
-    private static func collectBlocks(_ doc: PDFDocument) -> [Block] {
-        var blocks: [Block] = []
-        var yOffset: CGFloat = 0
-        for i in 0..<doc.pageCount {
-            guard let page = doc.page(at: i) else { continue }
-            let pageBounds = page.bounds(for: .mediaBox)
-            let count = page.numberOfCharacters
-            guard count > 0, let fullString = page.string else {
-                yOffset += pageBounds.height + 20
-                continue
-            }
-            let chars = Array(fullString)
-            var currentWord = ""
-            var wordBoundsMinX: CGFloat = .greatestFiniteMagnitude
-            var wordBoundsMaxY: CGFloat = 0   // flipped coords: larger Y = higher on page
+    private static func buildLines(_ doc: PDFDocument) -> [Line] {
+        var tokens: [Token] = []
+        for pi in 0..<doc.pageCount {
+            guard let page = doc.page(at: pi) else { continue }
+            let n = page.numberOfCharacters
+            guard n > 0, let str = page.string else { continue }
+            let chars = Array(str)
 
+            var word = ""
+            var minX: CGFloat = .greatestFiniteMagnitude
+            var minY: CGFloat = .greatestFiniteMagnitude
             func flush() {
-                let trimmed = currentWord.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { currentWord = ""; return }
-                let midX = wordBoundsMinX
-                blocks.append(Block(x: midX,
-                                    y: yOffset + wordBoundsMaxY,
-                                    s: currentWord))
-                currentWord = ""
-                wordBoundsMinX = .greatestFiniteMagnitude
-                wordBoundsMaxY = 0
+                let t = word.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty {
+                    tokens.append(Token(x: minX, y: minY, s: word))
+                }
+                word = ""
+                minX = .greatestFiniteMagnitude
+                minY = .greatestFiniteMagnitude
             }
-
-            for idx in 0..<count {
-                let ch = chars[idx]
-                let b = page.characterBounds(at: idx)
-                if ch.isWhitespace {
+            for i in 0..<n {
+                let c = chars[i]
+                if c.isWhitespace {
                     flush()
                 } else {
-                    if b.minX < wordBoundsMinX { wordBoundsMinX = b.minX }
-                    if b.maxY > wordBoundsMaxY { wordBoundsMaxY = b.maxY }
-                    currentWord.append(ch)
+                    let b = page.characterBounds(at: i)
+                    if b.minX < minX { minX = b.minX }
+                    if b.minY < minY { minY = b.minY }
+                    word.append(c)
                 }
             }
             flush()
-            yOffset += pageBounds.height + 20
         }
-        return blocks
+
+        // Merge stray ¥ with following digits on the same line.
+        tokens = mergeYenTokens(tokens)
+
+        // Sort: by y descending (will flip later if needed), x ascending.
+        tokens.sort { abs($0.y - $1.y) > 3 ? $0.y > $1.y : $0.x < $1.x }
+
+        // Group into lines by y (tolerance 3pt).
+        var lines: [Line] = []
+        var cur = Line(y: 0, tokens: [])
+        for t in tokens {
+            if cur.tokens.isEmpty || abs(t.y - cur.y) <= 3 {
+                if cur.tokens.isEmpty { cur.y = t.y }
+                cur.tokens.append(t)
+            } else {
+                cur.tokens.sort { $0.x < $1.x }
+                lines.append(cur)
+                cur = Line(y: t.y, tokens: [t])
+            }
+        }
+        if !cur.tokens.isEmpty {
+            cur.tokens.sort { $0.x < $1.x }
+            lines.append(cur)
+        }
+        return lines
     }
 
-    /// Group blocks into lines (Y desc, then X asc), then run keyword/amount
-    /// extraction. Direct port of Go `parse()`.
-    private static func parse(blocks: inout [Block], into inv: inout InvoiceData) {
-        // Sort: Y descending, X ascending within the same line.
-        blocks.sort { a, b in
-            if abs(a.y - b.y) > 2.0 { return a.y > b.y }
-            return a.x < b.x
-        }
-
-        // Group into lines by Y (tolerance 2pt).
-        struct Line { let y: CGFloat; var blocks: [Block] }
-        var lines: [Line] = []
-        var current = Line(y: 0, blocks: [])
-        for b in blocks {
-            if current.blocks.isEmpty {
-                current = Line(y: b.y, blocks: [b])
-            } else if abs(b.y - current.y) <= 2.0 {
-                current.blocks.append(b)
+    /// Merge "¥" tokens with the digit token immediately to their right on
+    /// the same line → "¥2000.00". Also handles "¥" + "2000.00" sitting at
+    /// the same x (overlapping). Returns tokens re-sorted by (y, x).
+    private static func mergeYenTokens(_ tokens: [Token]) -> [Token] {
+        // Group by line first (same y within tolerance).
+        var byLine: [[Token]] = []
+        var cur: [Token] = []
+        var curY: CGFloat = 0
+        let sorted = tokens.sorted { abs($0.y - $1.y) > 3 ? $0.y > $1.y : $0.x < $1.x }
+        for t in sorted {
+            if cur.isEmpty || abs(t.y - curY) <= 3 {
+                if cur.isEmpty { curY = t.y }
+                cur.append(t)
             } else {
-                lines.append(current)
-                current = Line(y: b.y, blocks: [b])
+                byLine.append(cur); cur = [t]; curY = t.y
             }
         }
-        if !current.blocks.isEmpty { lines.append(current) }
+        if !cur.isEmpty { byLine.append(cur) }
 
-        // Full concatenated text for type extraction.
-        let allText = lines.map { $0.blocks.map(\.s).joined() }.joined(separator: "\n")
-        inv.type = findType(in: allText)
-
-        let amountRe = try! NSRegularExpression(pattern: "\\d+\\.\\d+")
-
-        for line in lines {
-            let text = line.blocks.map(\.s).joined()
-            let compact = text.replacingOccurrences(of: " ", with: "")
-
-            // "合计" line but NOT "价税合计": 金额 and 税额 columns.
-            if compact.contains("合计") && !compact.contains("价税合计") {
-                let nums = extractLineAmounts(line.blocks, amountRe: amountRe)
-                if nums.count >= 1 { inv.totalBefore = nums[0] }
-                if nums.count >= 2 { inv.taxAmount = nums[1] }
+        var result: [Token] = []
+        for var line in byLine {
+            line.sort { $0.x < $1.x }
+            var merged: [Token] = []
+            var i = 0
+            while i < line.count {
+                let t = line[i]
+                if t.s == "¥" {
+                    // Find the next non-¥ token within a reasonable x gap.
+                    if i + 1 < line.count,
+                       let amt = leadingAmount(in: line[i + 1].s) {
+                        merged.append(Token(x: t.x, y: t.y, s: "¥" + amt))
+                        i += 2
+                        continue
+                    }
+                }
+                merged.append(t)
+                i += 1
             }
+            result.append(contentsOf: merged)
+        }
+        return result
+    }
 
-            // "价税合计" line: the grand total.
-            if text.contains("价税合计") || compact.contains("价税合计") {
-                let nums = extractLineAmounts(line.blocks, amountRe: amountRe)
-                if let first = nums.first { inv.totalWithTax = first }
+    /// If `s` starts with a decimal number, return it; else nil.
+    private static let leadingAmountRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "^-?[\\d,]+(?:\\.\\d+)?")
+    }()
+
+    private static func leadingAmount(in s: String) -> String? {
+        let ns = s as NSString
+        guard let m = leadingAmountRegex.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
+              m.range.length > 0 else { return nil }
+        return ns.substring(with: m.range).replacingOccurrences(of: ",", with: "")
+    }
+
+    // MARK: - Orientation
+
+    /// Detect whether lines are currently in reading order (title last, since
+    /// we sort y descending and PDFKit uses flipped coords → title at bottom).
+    /// If the FIRST line looks like the title region, no flip needed.
+    /// If the LAST line looks like the title, flip.
+    private static func needsFlip(_ lines: [Line]) -> Bool {
+        guard let first = lines.first, let last = lines.last else { return false }
+        // The title "电子发票" should be near the BOTTOM in our y-descending
+        // sort (flipped coords). If it's on the first line instead, the page
+        // used unflipped coords and we must flip.
+        let titleAppearsFirst = first.compact.contains("电子发票") || first.compact.contains("发票号码")
+        let titleAppearsLast = last.compact.contains("电子发票") || last.compact.contains("发票号码")
+        // We want title LAST (end of array). Flip if it's first.
+        return titleAppearsFirst && !titleAppearsLast
+    }
+
+    // MARK: - Parsing
+
+    private static func parse(lines: [Line], into inv: inout InvoiceData) {
+        // 1) Type: scan for *star-wrapped* goods name(s). Take the LAST one
+        //    before the 合计 line (closest to the actual totals). Go only
+        //    took the first match, which dropped the second half of names
+        //    like "*生产生活服务*餐费".
+        var typeCandidate = ""
+        var totalLineIdx: Int? = nil
+        for (i, line) in lines.enumerated() {
+            if let t = extractType(in: line.text), !t.isEmpty {
+                typeCandidate = t
+            }
+            // Identify the 合计 line (not 价税合计).
+            if line.compact.contains("合计") && !line.compact.contains("价税合计") {
+                if totalLineIdx == nil { totalLineIdx = i }
             }
         }
+        inv.type = typeCandidate
 
-        // Fallback: if 价税合计 not found, take the last amount that isn't
-        // already accounted for.
-        if inv.totalWithTax.isEmpty {
-            let allAmounts = amountRe.matches(in: allText, range: NSRange(allText.startIndex..., in: allText))
-                .map { String(allText[Range($0.range, in: allText)!]) }
-            for amt in allAmounts.reversed() where amt != inv.totalBefore && amt != inv.taxAmount {
-                inv.totalWithTax = amt
+        // 2) 价税合计 from the 价税合计 line (or its neighbour).
+        //
+        // The grand-total amount can sit on the keyword line, the line ABOVE
+        // it, or the line BELOW it — templates differ (the Chinese-capital
+        // line "贰佰…" + ¥xxx is usually adjacent to the 价税合计 label).
+        // Scan outward in reading order and take the first ¥-amount found.
+        // Resolved BEFORE 金额/税额 so the latter can use it as a constraint.
+        for (i, line) in lines.enumerated() where line.text.contains("价税合计") {
+            var amt = yenAmounts(in: line)
+            if amt.isEmpty {
+                let neighbours = [i - 1, i + 1, i - 2, i + 2].filter { $0 >= 0 && $0 < lines.count }
+                for j in neighbours {
+                    let a = yenAmounts(in: lines[j])
+                    if !a.isEmpty { amt = a; break }
+                }
+            }
+            if let total = amt.first {
+                inv.totalWithTax = total
                 break
             }
         }
-    }
 
-    /// All ¥-prefixed decimal amounts on a line, in X order.
-    /// Direct port of Go `extractLineAmounts`.
-    private static func extractLineAmounts(_ blocks: [Block], amountRe: NSRegularExpression) -> [String] {
-        let sorted = blocks.sorted { $0.x < $1.x }
-        let fullText = sorted.map(\.s).joined()
-
-        // First try: ¥amount patterns from the full line text.
-        let yenRe = try! NSRegularExpression(pattern: "¥\\s*([\\d,]+(?:\\.\\d+)?)")
-        let yenMatches = yenRe.matches(in: fullText, range: NSRange(fullText.startIndex..., in: fullText))
-        if !yenMatches.isEmpty {
-            return yenMatches.compactMap { m -> String? in
-                guard let r = Range(m.range(at: 1), in: fullText) else { return nil }
-                return String(fullText[r]).replacingOccurrences(of: ",", with: "")
+        // Fallback if 价税合计 still empty: take the largest ¥-amount on the
+        // page (the grand total is the biggest single ¥ value).
+        if inv.totalWithTax.isEmpty {
+            var best: Double = -1
+            var bestStr = ""
+            for line in lines {
+                for a in yenAmounts(in: line) {
+                    if let v = Double(a), v > best { best = v; bestStr = a }
+                }
             }
+            inv.totalWithTax = bestStr
         }
 
-        // Fallback: ¥ symbol and number in separate blocks.
-        var results: [String] = []
-        var seenYen = false
-        for b in sorted {
-            let s = b.s.trimmingCharacters(in: .whitespaces)
-            if s == "¥" {
-                seenYen = true
+        // 3) 金额 / 税额 from the 合计 line.
+        //
+        // The 合计 row sums the 金额 (ex-tax) and 税额 (tax) columns. Cells
+        // may or may not carry ¥. We collect ALL amount candidates on the
+        // 合计 line (and its neighbour if empty), then pick the pair whose
+        // sum best matches the 价税合计 — this disambiguates stray unit
+        // prices (e.g. a leftover "27.85" from the goods row above) from
+        // the real column totals.
+        if let idx = totalLineIdx {
+            var candidates = amountCandidates(in: lines[idx])
+            if candidates.count < 2, idx + 1 < lines.count {
+                let below = amountCandidates(in: lines[idx + 1])
+                if below.count > candidates.count {
+                    candidates = below
+                }
+            }
+            if candidates.count >= 2 {
+                let (before, tax) = pickAmountPair(candidates, totalWithTax: inv.totalWithTax)
+                inv.totalBefore = before
+                inv.taxAmount = tax
+            } else if candidates.count == 1 {
+                inv.totalBefore = candidates[0].amount
+            }
+        }
+    }
+
+    /// All ¥-prefixed amounts on a line, in x order. Returns ["2000.00", "0.00"]
+    /// for "¥2000.00 ¥0.00".
+    private static func yenAmounts(in line: Line) -> [String] {
+        var out: [String] = []
+        for t in line.tokens {
+            if t.s.hasPrefix("¥") {
+                let rest = String(t.s.dropFirst()).replacingOccurrences(of: ",", with: "")
+                if let amt = leadingAmount(in: rest) { out.append(amt) }
+            }
+        }
+        return out
+    }
+
+    /// An amount found on a line, with its x position and whether it carried ¥.
+    private struct AmountCandidate {
+        let x: CGFloat
+        let amount: String
+        let hasYen: Bool
+        var value: Double? { Double(amount) }
+    }
+
+    /// Every decimal amount on a line in x order — both ¥-prefixed and bare.
+    /// Bare candidates skip tax-rate tokens like "6%", "3%", "0.06" and the
+    /// literal "0". ¥-tagged candidates are always kept.
+    private static func amountCandidates(in line: Line) -> [AmountCandidate] {
+        var out: [AmountCandidate] = []
+        for t in line.tokens {
+            if t.s.hasPrefix("¥") {
+                let rest = String(t.s.dropFirst()).replacingOccurrences(of: ",", with: "")
+                if let amt = leadingAmount(in: rest) {
+                    out.append(AmountCandidate(x: t.x, amount: amt, hasYen: true))
+                }
                 continue
             }
-            if seenYen {
-                if let r = amountRe.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
-                   let range = Range(r.range, in: s) {
-                    results.append(String(s[range]))
-                }
-                seenYen = false
+            if t.s.contains("%") { continue }
+            if let amt = leadingAmount(in: t.s), amt != "0" {
+                out.append(AmountCandidate(x: t.x, amount: amt, hasYen: false))
             }
         }
-        if results.isEmpty {
-            for b in sorted {
-                let s = b.s.trimmingCharacters(in: .whitespaces)
-                if let r = amountRe.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
-                   let range = Range(r.range, in: s) {
-                    results.append(String(s[range]))
-                }
-            }
-        }
-        return results
+        return out.sorted { $0.x < $1.x }
     }
 
-    /// Invoice type: content wrapped in *asterisks*. Port of Go `findType`.
-    private static func findType(in text: String) -> String {
-        guard let r = text.range(of: "\\*[^*]+\\*", options: .regularExpression) else { return "" }
-        let matched = String(text[r])
+    /// Pick the (金额, 税额) pair from candidates.
+    ///
+    /// Heuristics, in priority order:
+    /// 1. If we know 价税合计, only consider pairs (i<j by x) whose sum
+    ///    rounds to it. Among those, prefer the pair with MORE ¥-tagged
+    ///    members (a stray bare unit price from the goods row above is the
+    ///    usual contaminant; the real column totals are ¥-prefixed).
+    /// 2. Tie-break by smaller numerical error, then by the pair whose 税额
+    ///    (right member) is the smaller of the two (税额 < 金额 in practice).
+    /// 3. If 价税合计 is unknown, take the rightmost two by x.
+    private static func pickAmountPair(_ candidates: [AmountCandidate],
+                                       totalWithTax: String) -> (String, String) {
+        let target = Double(totalWithTax)
+        let n = candidates.count
+        guard n >= 2 else {
+            return (candidates.first?.amount ?? "", "")
+        }
+
+        let fallback = (candidates[n - 2].amount, candidates[n - 1].amount)
+        guard let target = target else { return fallback }
+
+        var best: (String, String)? = nil
+        var bestYenCount = -1
+        var bestErr = Double.infinity
+        var bestTaxSmaller = false
+
+        for i in 0..<(n - 1) {
+            for j in (i + 1)..<n {
+                guard let vi = candidates[i].value, let vj = candidates[j].value else { continue }
+                let err = abs((vi + vj) - target)
+                if err >= 0.02 { continue }   // must round to 价税合计
+
+                let yenCount = (candidates[i].hasYen ? 1 : 0) + (candidates[j].hasYen ? 1 : 0)
+                let taxSmaller = vj <= vi     // 税额 (right col) ≤ 金额 (left col)
+
+                // Priority: more ¥ tags, then tax ≤ amount, then smaller error.
+                let better: Bool
+                if best == nil { better = true }
+                else if yenCount != bestYenCount { better = yenCount > bestYenCount }
+                else if taxSmaller != bestTaxSmaller { better = taxSmaller && !bestTaxSmaller }
+                else { better = err < bestErr }
+
+                if better {
+                    best = (candidates[i].amount, candidates[j].amount)
+                    bestYenCount = yenCount
+                    bestErr = err
+                    bestTaxSmaller = taxSmaller
+                }
+            }
+        }
+        return best ?? fallback
+    }
+
+    /// Extract the goods type wrapped in *stars*. Returns the FULL matched
+    /// span (e.g. "*生产生活服务*餐费"), with stars trimmed.
+    private static let typeRegex: NSRegularExpression = {
+        // One or more *delimited* segments glued together:
+        //   *餐饮服务*餐饮服务  /  *生产生活服务*餐费  /  *预付卡销售*预付卡
+        try! NSRegularExpression(pattern: "(?:\\*[^*]+\\*)+")
+    }()
+
+    private static func extractType(in text: String) -> String? {
+        let ns = text as NSString
+        guard let m = typeRegex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else {
+            return nil
+        }
+        let matched = ns.substring(with: m.range)
         return matched.trimmingCharacters(in: CharacterSet(charactersIn: "*"))
     }
 }

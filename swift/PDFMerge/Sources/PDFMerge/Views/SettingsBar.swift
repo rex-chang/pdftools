@@ -54,7 +54,14 @@ struct SettingsBar: View {
             }
 
             // Status + progress (mirrors StatusLabel + ProgressBar/ProgressInfinite)
-            if state.statusVisible {
+            if state.isExtracting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(state.extractStatus)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                }
+            } else if state.statusVisible {
                 HStack(spacing: 8) {
                     if state.isMerging {
                         ProgressView().controlSize(.small)

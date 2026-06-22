@@ -27,6 +27,10 @@ final class AppState: ObservableObject {
     @Published var invoiceDebugTexts: [String] = []
     @Published var showInvoiceDialog: Bool = false
 
+    // MARK: Extraction progress (OCR can take 1-3s per broken file)
+    @Published var isExtracting: Bool = false
+    @Published var extractStatus: String = ""
+
     // Private: background merge task for cancellation.
     private var mergeTask: Task<Void, Never>? = nil
 
@@ -94,7 +98,7 @@ final class AppState: ObservableObject {
     }
 
     var canMerge: Bool { items.count >= 2 && !isMerging }
-    var canExtract: Bool { !items.isEmpty && !isMerging }
+    var canExtract: Bool { !items.isEmpty && !isMerging && !isExtracting }
 
     // MARK: Merge
 
@@ -161,14 +165,24 @@ final class AppState: ObservableObject {
     // MARK: Invoice extraction
 
     func extractInvoices() {
-        guard !items.isEmpty else { return }
+        guard !items.isEmpty, !isExtracting else { return }
         let inputs = paths
+        isExtracting = true
+        extractStatus = "提取中 0/\(inputs.count)…"
         Task {
-            let results = InvoiceExtractor.extractAll(paths: inputs)
+            // Extraction is a mix of fast text-layer parsing and slow OCR
+            // (for broken PDFs). Run off the main actor, posting progress.
+            let results = InvoiceExtractor.extractAll(paths: inputs) { done, total, name in
+                Task { @MainActor in
+                    self.extractStatus = "提取中 \(done)/\(total): \(name)"
+                }
+            }
             let debug = inputs.map { InvoiceExtractor.debugText(at: $0) }
             await MainActor.run {
                 self.invoiceResults = results
                 self.invoiceDebugTexts = debug
+                self.isExtracting = false
+                self.extractStatus = ""
                 self.showInvoiceDialog = true
             }
         }

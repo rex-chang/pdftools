@@ -33,6 +33,10 @@ struct InvoiceDialog: View {
             }
             .tableStyle(.bordered)
 
+            // Summary: sum of 价税合计 across all valid (parseable) rows.
+            summaryBar
+            Divider()
+
             // Buttons
             Divider()
             HStack {
@@ -70,6 +74,45 @@ struct InvoiceDialog: View {
 
     private var csvRows: [[String]] {
         [InvoiceData.csvHeader] + results.map(\.csvRow)
+    }
+
+    // MARK: - Summary
+
+    /// Sum 价税合计 across rows whose total parses as a number. Rows that
+    /// failed extraction (totalWithTax like "失败: ...") are skipped and the
+    /// user is told how many were skipped so the total isn't misleading.
+    private var summary: (total: Double, counted: Int, skipped: Int) {
+        var total = 0.0
+        var counted = 0
+        for r in results {
+            if let v = Double(r.totalWithTax) {
+                total += v
+                counted += 1
+            }
+        }
+        return (total, counted, results.count - counted)
+    }
+
+    private var summaryBar: some View {
+        let s = summary
+        return HStack(spacing: 12) {
+            Text("价税合计汇总")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(String(format: "¥%.2f", s.total))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.accentColor)
+            Text("（\(s.counted) 张")
+                .font(.caption).foregroundStyle(.secondary)
+            if s.skipped > 0 {
+                Text("· \(s.skipped) 张失败）")
+                    .font(.caption).foregroundStyle(.orange)
+            } else {
+                Text("）").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 }
 
