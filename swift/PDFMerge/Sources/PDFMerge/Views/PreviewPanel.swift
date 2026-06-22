@@ -21,7 +21,7 @@ struct PreviewPanel: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    // MARK: Header (filename + size + pages + path)
+    // MARK: Header (filename + size + pages)
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -45,12 +45,12 @@ struct PreviewPanel: View {
 
     private func previewContent(for item: FileItem) -> some View {
         VStack(spacing: 0) {
-            // Real PDF rendering. Key handling lives in PdfKitView; selection
-            // changes recreate it via .id(item.path) so PDFDocument is reloaded.
-            PdfKitView(path: item.path)
+            // The loader drives loading/error/PDFView states. Keying on path
+            // gives us a fresh loader per file (cancels any in-flight load).
+            PdfPreviewContainer(path: item.path)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .id(item.path)
             Divider()
-            // Path row at the bottom so the page view gets maximum vertical space.
             pathRow(item.path)
         }
     }
@@ -84,57 +84,122 @@ struct PreviewPanel: View {
     }
 }
 
-/// Bridges AppKit's `PDFView` into SwiftUI. Displays the document for `path`
-/// with continuous scrolling, fit-to-width scaling, and the standard macOS
-/// PDF view interactions (scroll, zoom via ⌘+/⌘-, page nav).
-///
-/// `PDFView` is the canonical preview surface on macOS (it's what Quick Look
-/// uses), so wrapping it gives us zoom/scroll/selection for free.
-struct PdfKitView: NSViewRepresentable {
-    let path: String
+/// Owns the loading state for a single PDF. Loading runs on a background
+/// Task so large PDFs don't block the UI; a `@Published` state drives the
+/// view (loading / loaded / error).
+@MainActor
+final class PdfLoader: ObservableObject {
+    enum State: Equatable {
+        case loading
+        case loaded
+        case failed(String)
+    }
 
-    func makeNSView(context: Context) -> PDFView {
-        let view = PDFView()
-        view.autoScales = true
-        view.displayMode = .singlePageContinuous
-        view.displayDirection = .vertical
-        view.backgroundColor = .windowBackgroundColor
-        // A sensible minimum so pages never render unreadably small even
-        // before autoScales kicks in.
-        view.minScaleFactor = 0.5
-        view.scaleFactor = 1.0
-        // Load document.
-        if let doc = PDFDocument(url: URL(fileURLWithPath: path)) {
-            view.document = doc
-            // autoScales needs the view to have a real size to compute
-            // fit-to-width, which isn't available yet in makeNSView. Defer
-            // the fit-to-width to the next layout pass.
-            DispatchQueue.main.async { [weak view] in
-                guard let view = view, view.document != nil else { return }
-                view.scaleFactor = view.scaleFactorForSizeToFit
-                // Re-evaluate once more after the scrollview settles — a
-                // single async pass sometimes runs before the PDF's own
-                // scroll view has its final frame.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak view] in
-                    view?.scaleFactor = view?.scaleFactorForSizeToFit ?? 1.0
+    @Published private(set) var state: State = .loading
+    /// The loaded document. Handed off to the PDFView on the main thread.
+    private(set) var document: PDFDocument?
+    private var loadTask: Task<Void, Never>? = nil
+
+    func load(path: String) {
+        loadTask?.cancel()
+        state = .loading
+        document = nil
+        loadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            // `PDFDocument(url:)` is documented as safe off-main (it's the
+            // explicit initializer, not one of the view-bound conveniences).
+            var doc: PDFDocument?
+            var error: String?
+            if let opened = PDFDocument(url: URL(fileURLWithPath: path)) {
+                // Encrypted: try empty password (many e-invoices do this).
+                // If it stays locked, surface as an error so the user isn't
+                // left looking at a blank view.
+                if opened.isEncrypted && !opened.unlock(withPassword: "") {
+                    error = "PDF 已加密,无法预览(需密码)"
+                } else {
+                    doc = opened
+                }
+            } else {
+                error = "无法打开(文件损坏或不存在)"
+            }
+            await self?.finish(doc: doc, error: error)
+        }
+    }
+
+    private func finish(doc: PDFDocument?, error: String?) {
+        if let doc = doc {
+            document = doc
+            state = .loaded
+        } else if let error = error {
+            state = .failed(error)
+        } else {
+            state = .failed("未知错误")
+        }
+    }
+}
+
+/// Wraps the async loading + PDFView rendering. Shows a spinner while
+/// loading, an error placeholder on failure, and the live PDFView on success.
+struct PdfPreviewContainer: View {
+    let path: String
+    @StateObject private var loader = PdfLoader()
+
+    var body: some View {
+        Group {
+            switch loader.state {
+            case .loading:
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.large)
+                    Text("加载中…").foregroundStyle(.secondary).font(.caption)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .failed(let message):
+                VStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.orange)
+                    Text(message).font(.headline)
+                    Text("该文件仍可参与合并,但预览不可用")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loaded:
+                if let doc = loader.document {
+                    PdfKitView(document: doc)
                 }
             }
         }
+        .onAppear { loader.load(path: path) }
+    }
+}
+
+/// Bridges AppKit's `PDFView` into SwiftUI. Takes a pre-loaded PDFDocument
+/// (loaded off-main by PdfLoader) so this view never blocks on I/O.
+///
+/// Scaling strategy: rely on `autoScales = true`, which makes PDFView
+/// fit-to-width on load and on window resize. We do NOT manually set
+/// `scaleFactor` — the previous manual-fit-on-async conflicted with
+/// autoScales and reset the user's zoom on every resize. autoScales alone
+/// gives the correct, stable behaviour.
+struct PdfKitView: NSViewRepresentable {
+    let document: PDFDocument
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true              // fit-to-width, updates on resize
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = .windowBackgroundColor
+        view.minScaleFactor = 0.25
+        view.document = document
         return view
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        // Only swap the document when the path actually changes — SwiftUI
-        // calls updateNSView on re-renders, and reloading would reset the
-        // user's scroll/zoom position needlessly.
-        let currentPath = (nsView.document?.documentURL?.path) ?? ""
-        if currentPath != path {
-            nsView.document = PDFDocument(url: URL(fileURLWithPath: path))
-            // Re-fit on document change, again deferred so the view has size.
-            DispatchQueue.main.async { [weak nsView] in
-                guard let nsView = nsView, nsView.document != nil else { return }
-                nsView.scaleFactor = nsView.scaleFactorForSizeToFit
-            }
+        // Only swap when the document object identity differs. Since
+        // PdfPreviewContainer is keyed by path, we get a fresh PdfKitView per
+        // file anyway; this guard is defensive.
+        if nsView.document !== document {
+            nsView.document = document
         }
     }
 }

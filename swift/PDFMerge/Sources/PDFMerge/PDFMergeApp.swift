@@ -29,7 +29,8 @@ struct PDFMergeApp: App {
                 }
                 .sheet(isPresented: $state.showInvoiceDialog) {
                     InvoiceDialog(results: state.invoiceResults,
-                                  debugTexts: state.invoiceDebugTexts,
+                                  paths: state.invoiceInputPathsForDialog,
+                                  fetchDebugText: { state.debugText(for: $0) },
                                   isPresented: $state.showInvoiceDialog)
                 }
         }
@@ -68,21 +69,29 @@ struct ContentView: View {
     }
 
     /// Drag-and-drop PDF files. Mirrors Go `Window.SetOnDropped`.
+    ///
+    /// `NSItemProvider.loadObject` invokes its completion handler on an
+    /// arbitrary background queue, and multiple providers run concurrently.
+    /// Appending to a plain Swift Array from those handlers is a data race
+    /// (it can lose entries or crash). We hop each result to the main thread
+    /// — main thread is serial, so the collection is safe — and count
+    /// pending providers to know when all have reported.
     private func handleDrop(_ providers: [NSItemProvider]) {
-        var paths: [String] = []
-        let group = DispatchGroup()
+        let count = providers.count
+        var collected: [String] = []
+        var remaining = count
         for p in providers {
-            group.enter()
             _ = p.loadObject(ofClass: URL.self) { url, _ in
-                defer { group.leave() }
-                if let url = url, Format.isPDF(url.path) {
-                    paths.append(url.path)
+                let path = (url as URL?)?.path
+                DispatchQueue.main.async {
+                    if let path = path, Format.isPDF(path) {
+                        collected.append(path)
+                    }
+                    remaining -= 1
+                    if remaining == 0, !collected.isEmpty {
+                        state.addFiles(collected)
+                    }
                 }
-            }
-        }
-        group.notify(queue: .main) {
-            if !paths.isEmpty {
-                state.addFiles(paths)
             }
         }
     }

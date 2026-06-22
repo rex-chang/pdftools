@@ -6,12 +6,18 @@ import UniformTypeIdentifiers
 /// Mirrors Go `ui/invoice.go` (ShowInvoiceDialog).
 struct InvoiceDialog: View {
     let results: [InvoiceData]
-    let debugTexts: [String]
+    /// Paths matching `results`, used to compute raw debug text on demand
+    /// (only when the user opens the "原始文本" view, rather than opening
+    /// every PDF twice during extraction).
+    let paths: [String]
+    /// Lazily fetches the plain-text dump of a PDF by path.
+    var fetchDebugText: (String) -> String
     @Binding var isPresented: Bool
 
     @State private var isShowingSaveDialog = false
     @State private var showDebugText = false
     @State private var exportError: String? = nil
+    @State private var debugTextsCache: [String]? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,8 +50,13 @@ struct InvoiceDialog: View {
             // Buttons
             Divider()
             HStack {
-                if !debugTexts.isEmpty {
-                    Button("原始文本") { showDebugText = true }
+                if !paths.isEmpty {
+                    Button("原始文本") {
+                        // Compute debug text now, on demand — avoids the
+                        // previous eager double-open of every PDF.
+                        debugTextsCache = paths.map(fetchDebugText)
+                        showDebugText = true
+                    }
                 }
                 Spacer()
                 Button("导出 CSV") { isShowingSaveDialog = true }
@@ -72,7 +83,7 @@ struct InvoiceDialog: View {
             }
         }
         .sheet(isPresented: $showDebugText) {
-            DebugTextDialog(texts: debugTexts, isPresented: $showDebugText)
+            DebugTextDialog(texts: debugTextsCache ?? [], isPresented: $showDebugText)
         }
     }
 

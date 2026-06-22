@@ -26,14 +26,29 @@ final class AppState: ObservableObject {
     @Published var invoiceResults: [InvoiceData] = []
     @Published var invoiceDebugTexts: [String] = []
     @Published var showInvoiceDialog: Bool = false
+    /// Paths for the last extraction, kept so debug text can be computed
+    /// lazily when the user opens the raw-text view (instead of opening
+    /// every PDF twice during extraction).
+    private(set) var invoiceInputPaths: [String] = []
+    /// Read-only accessor for the dialog to bind to.
+    var invoiceInputPathsForDialog: [String] { invoiceInputPaths }
 
     // MARK: Extraction progress (OCR can take 1-3s per broken file)
     @Published var isExtracting: Bool = false
     @Published var extractStatus: String = ""
     private var extractTask: Task<Void, Never>? = nil
+    /// Generation tag for extraction (same pattern as mergeGeneration):
+    /// prevents a cancelled run's finish callback from overwriting a newer one.
+    private var extractGeneration: Int = 0
 
     // Private: background task handles for cancellation.
     private var mergeTask: Task<Void, Never>? = nil
+    /// Monotonic generation tag. Each new merge() bumps it; finish callbacks
+    /// carry the generation they were started with and bail out if it no
+    /// longer matches `mergeGeneration`. This prevents a cancelled task from
+    /// stomping on the freshly-started merge's state when it eventually gets
+    /// around to throwing CancellationError.
+    private var mergeGeneration: Int = 0
     /// Tracks addFiles operations so we can show a "正在添加…" indicator and
     /// avoid overlapping adds stomping on each other's dedup checks.
     @Published var isAddingFiles: Bool = false
@@ -176,6 +191,11 @@ final class AppState: ObservableObject {
             lastMessage = "输出路径为空"
             return
         }
+        // Strip path separators and other characters macOS/Windows disallow
+        // in filenames — otherwise "a/b.pdf" would be treated as a subpath
+        // and write outside the chosen directory.
+        let illegal = CharacterSet(charactersIn: "/\\:*?<>|")
+        name = name.components(separatedBy: illegal).joined(separator: "-")
         // Ensure a .pdf extension so macOS treats the file as a PDF.
         if (name as NSString).pathExtension.lowercased() != "pdf" {
             name += ".pdf"
@@ -184,6 +204,10 @@ final class AppState: ObservableObject {
 
         // Cancel any in-flight merge (mirrors Go's context cancel swap).
         mergeTask?.cancel()
+        // Bump generation so any in-flight finish callback from the previous
+        // merge knows it's stale and won't overwrite our state.
+        mergeGeneration += 1
+        let generation = mergeGeneration
 
         let inputs = paths
         isMerging = true
@@ -198,19 +222,23 @@ final class AppState: ObservableObject {
         mergeTask = Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 let result = try PDFMerger.merge(inputs, to: outputPath)
-                await self?.finishMergeSuccess(result: result, name: name, outputPath: outputPath)
+                await self?.finishMergeSuccess(result: result, name: name, outputPath: outputPath, generation: generation)
             } catch is CancellationError {
-                await self?.finishMergeCancelled()
+                await self?.finishMergeCancelled(generation: generation)
             } catch {
                 let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                await self?.finishMergeError(message: msg)
+                await self?.finishMergeError(message: msg, generation: generation)
             }
         }
     }
 
-    private func finishMergeSuccess(result: (merged: Int, skipped: [String]), name: String, outputPath: String) {
+    private func finishMergeSuccess(result: (merged: Int, skipped: [String]), name: String, outputPath: String, generation: Int) {
+        // Stale callback from a cancelled merge — ignore so we don't clobber
+        // the newer merge's state.
+        guard generation == mergeGeneration else { return }
         isMerging = false
         progressValue = 1.0
+        statusVisible = true
         lastMergeOutput = URL(fileURLWithPath: outputPath)
         var statusMsg = "已合并 \(result.merged) 页 → \(name)"
         if !result.skipped.isEmpty {
@@ -220,15 +248,19 @@ final class AppState: ObservableObject {
         lastMessage = "成功合并 \(result.merged) 页到:\n\(outputPath)"
     }
 
-    private func finishMergeCancelled() {
+    private func finishMergeCancelled(generation: Int) {
+        guard generation == mergeGeneration else { return }
         isMerging = false
         progressValue = nil
+        statusVisible = false
         statusText = "已取消"
     }
 
-    private func finishMergeError(message: String) {
+    private func finishMergeError(message: String, generation: Int) {
+        guard generation == mergeGeneration else { return }
         isMerging = false
         progressValue = nil
+        statusVisible = true
         statusText = "错误: \(message)"
         lastMessage = "合并失败: \(message)"
     }
@@ -242,7 +274,12 @@ final class AppState: ObservableObject {
     // MARK: Invoice extraction
 
     func extractInvoices() {
-        guard !items.isEmpty, !isExtracting else { return }
+        guard !items.isEmpty else { return }
+        // Cancel any in-flight extraction and bump generation so its stale
+        // finish callback won't overwrite this run's results.
+        extractTask?.cancel()
+        extractGeneration += 1
+        let generation = extractGeneration
         let inputs = paths
         isExtracting = true
         extractStatus = "提取中 0/\(inputs.count)…"
@@ -251,13 +288,17 @@ final class AppState: ObservableObject {
         // is cooperative: extractAll checks Task.isCancelled between files.
         extractTask = Task.detached(priority: .userInitiated) { [weak self] in
             let results = InvoiceExtractor.extractAll(paths: inputs) { done, total, name in
-                // Inline MainActor hop avoids spawning a new Task per callback.
+                // Hop to the main actor for the UI update. (We do spawn one
+                // short Task per progress callback — N small Tasks, not
+                // ideal, but progress callbacks are infrequent: one per file.)
                 Task { @MainActor in
                     self?.extractStatus = "提取中 \(done)/\(total): \(name)"
                 }
             }
-            let debug = inputs.map { InvoiceExtractor.debugText(at: $0) }
-            await self?.finishExtraction(results: results, debug: debug)
+            // Debug text is computed lazily: only fetch it if the user
+            // actually opens the "原始文本" view, to avoid opening every PDF
+            // twice (once for extraction, once for full-text dump).
+            await self?.finishExtraction(results: results, inputs: inputs, generation: generation)
         }
     }
 
@@ -267,12 +308,24 @@ final class AppState: ObservableObject {
         extractTask?.cancel()
     }
 
-    private func finishExtraction(results: [InvoiceData], debug: [String]) {
+    /// Compute debug text for a given file on demand (called when the user
+    /// opens the "原始文本" view). Avoids the previous eager double-open of
+    /// every PDF during extraction.
+    func debugText(for path: String) -> String {
+        InvoiceExtractor.debugText(at: path)
+    }
+
+    private func finishExtraction(results: [InvoiceData], inputs: [String], generation: Int) {
+        // Stale callback from a cancelled extraction — ignore so we don't
+        // overwrite a newer run's results.
+        guard generation == extractGeneration else { return }
         invoiceResults = results
-        invoiceDebugTexts = debug
+        // Keep the input paths around so debug text can be computed lazily
+        // when the user opens the raw-text view.
+        invoiceInputPaths = inputs
+        invoiceDebugTexts = []   // cleared; recomputed on demand
         isExtracting = false
         extractStatus = ""
-        // If cancelled mid-way, only show results if we got at least one.
         if !results.isEmpty {
             showInvoiceDialog = true
         }

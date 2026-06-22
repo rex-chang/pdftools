@@ -37,6 +37,14 @@ enum PDFMerger {
                 skipped.append((path as NSString).lastPathComponent)
                 continue
             }
+            // Encrypted PDFs: try empty password (many electronic invoices
+            // are encrypted with no password). If unlock fails, skip the
+            // file rather than inserting locked placeholder pages that would
+            // silently produce a "successful" merge full of blanks.
+            if doc.isEncrypted && !doc.unlock(withPassword: "") {
+                skipped.append((path as NSString).lastPathComponent + "(加密)")
+                continue
+            }
             for i in 0..<doc.pageCount {
                 if let page = doc.page(at: i) {
                     out.insert(page, at: insertIndex)
