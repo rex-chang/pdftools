@@ -43,6 +43,7 @@ func NewApp() *App {
 	}
 
 	a.Settings = NewSettings(a.Window, a.handleMerge)
+	a.Settings.OnExtract = a.handleExtract
 
 	toolbar := a.FileList.CreateToolbar()
 	listTitle := widget.NewLabel("文件队列")
@@ -110,11 +111,29 @@ func (a *App) updatePreview() {
 func (a *App) updateMergeState() {
 	count := len(a.FileList.Items)
 	a.Settings.SetMergeEnabled(count >= 2)
-	if count < 2 {
-		a.Settings.SetStatus("等待添加至少 2 个 PDF 文件")
+	a.Settings.SetInvEnabled(count > 0)
+}
+
+func (a *App) handleExtract() {
+	paths := a.FileList.GetPaths()
+	if len(paths) == 0 {
 		return
 	}
-	a.Settings.SetStatus(fmt.Sprintf("已添加 %d 个 PDF，可以合并", count))
+
+	go func() {
+		results := pdf.ExtractInvoiceDataFromFiles(paths)
+
+		// Collect raw text for debugging
+		var debugTexts []string
+		for _, p := range paths {
+			text, err := pdf.DebugText(p)
+			if err == nil {
+				debugTexts = append(debugTexts, text)
+			}
+		}
+
+		ShowInvoiceDialog(a.Window, results, debugTexts)
+	}()
 }
 
 func (a *App) handleMerge(outputPath string) {

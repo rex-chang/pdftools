@@ -9,7 +9,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -19,7 +18,9 @@ type Settings struct {
 	OutputName  *widget.Entry
 	OutputDir   *widget.Entry
 	OnMerge     func(string)
+	OnExtract   func()
 	MergeBtn    *widget.Button
+	InvBtn      *widget.Button
 	Progress    *widget.ProgressBarInfinite
 	ProgressBar *widget.ProgressBar
 	StatusLabel *widget.Label
@@ -55,6 +56,9 @@ func NewSettings(w fyne.Window, onMerge func(string)) *Settings {
 		}, w)
 	})
 
+	dirRow := container.NewBorder(nil, nil, widget.NewLabel("目录:"), dirBtn, s.OutputDir)
+	nameRow := container.NewBorder(nil, nil, widget.NewLabel("文件名:"), nil, s.OutputName)
+
 	s.MergeBtn = widget.NewButtonWithIcon("合并 PDF", theme.DocumentSaveIcon(), func() {
 		if s.OnMerge != nil {
 			s.OnMerge(s.getOutputPath())
@@ -62,6 +66,13 @@ func NewSettings(w fyne.Window, onMerge func(string)) *Settings {
 	})
 	s.MergeBtn.Importance = widget.HighImportance
 	s.MergeBtn.Disable()
+
+	s.InvBtn = widget.NewButtonWithIcon("提取价税", theme.SearchIcon(), func() {
+		if s.OnExtract != nil {
+			s.OnExtract()
+		}
+	})
+	s.InvBtn.Disable()
 
 	s.ProgressBar = widget.NewProgressBar()
 	s.ProgressBar.Hide()
@@ -71,26 +82,18 @@ func NewSettings(w fyne.Window, onMerge func(string)) *Settings {
 
 	s.StatusLabel = widget.NewLabel("")
 	s.StatusLabel.Wrapping = fyne.TextWrapOff
-	s.StatusLabel.SetText("等待添加至少 2 个 PDF 文件")
+	s.StatusLabel.Hide()
 
-	dirLabel := widget.NewLabel("目录:")
-	dirRow := container.NewBorder(nil, nil, dirLabel, dirBtn, s.OutputDir)
+	form := container.NewVBox(dirRow, nameRow)
 
-	nameLabel := widget.NewLabel("文件名:")
-	nameRow := container.NewBorder(nil, nil, nameLabel, nil, s.OutputName)
-
-	formBox := container.NewVBox(dirRow, nameRow)
-	actionRow := container.NewHBox(layout.NewSpacer(), s.MergeBtn)
 	progressBox := container.NewBorder(nil, nil, nil, nil, container.NewHBox(s.ProgressBar, s.Progress))
 
 	s.Container = container.NewVBox(
 		widget.NewSeparator(),
-		container.NewPadded(container.NewVBox(
-			title,
-			formBox,
-			s.StatusLabel,
-			actionRow,
-		)),
+		title,
+		form,
+		container.NewCenter(container.NewHBox(s.MergeBtn, s.InvBtn)),
+		s.StatusLabel,
 		progressBox,
 	)
 
@@ -102,6 +105,14 @@ func (s *Settings) SetMergeEnabled(enabled bool) {
 		s.MergeBtn.Enable()
 	} else {
 		s.MergeBtn.Disable()
+	}
+}
+
+func (s *Settings) SetInvEnabled(enabled bool) {
+	if enabled {
+		s.InvBtn.Enable()
+	} else {
+		s.InvBtn.Disable()
 	}
 }
 

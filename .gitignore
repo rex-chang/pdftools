@@ -7,3 +7,11 @@ pdfmerge
 .DS_Store
 *.swp
 *.swo
+
+# build artifacts
+*.app
+
+# local debug/scratch programs
+debug/
+diagnose/
+test_invoice/
