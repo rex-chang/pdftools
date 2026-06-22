@@ -5,19 +5,22 @@ import PDFKit
 struct InvoiceData: Identifiable {
     let id = UUID()
     let fileName: String
-    var type: String = ""
+    var type: String = ""   // 类型
     var totalWithTax: String = ""   // 价税合计
     var totalBefore: String = ""    // 金额(不含税)
     var taxAmount: String = ""      // 税额
+    /// Populated only when extraction failed. Surfaced in the UI so the
+    /// user knows *why* a row is empty (encrypted? OCR found nothing?).
+    var errorMessage: String = ""
 
-    var isEmpty: Bool {
-        totalWithTax.isEmpty && totalBefore.isEmpty && taxAmount.isEmpty
-    }
+    /// True when extraction produced no usable totals (either failed or
+    /// genuinely empty). Used to drive summary-bar accounting.
+    var failed: Bool { !errorMessage.isEmpty }
 
-    static let csvHeader = ["文件名", "类型", "价税合计", "金额(不含税)", "税额"]
+    static let csvHeader = ["文件名", "类型", "价税合计", "金额(不含税)", "税额", "备注"]
 
     var csvRow: [String] {
-        [fileName, type, totalWithTax, totalBefore, taxAmount]
+        [fileName, type, totalWithTax, totalBefore, taxAmount, errorMessage]
     }
 }
 
@@ -50,28 +53,52 @@ struct InvoiceData: Identifiable {
 /// ("电子发票") lands on the last line.
 enum InvoiceExtractor {
 
-    static func extract(at path: String) -> InvoiceData? {
-        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else { return nil }
-        var lines = buildLines(doc)
-        if !lines.isEmpty {
-            // Orient: ensure lines are sorted top-to-bottom in reading order.
-            // Empirically characterBounds returns flipped coords (origin top-left),
-            // so larger y = lower on page → reading order is descending y.
-            // Detect by checking which end the title sits on; flip if needed.
-            if needsFlip(lines) { lines.reverse() }
+    // Tunables (extracted from inline magic numbers).
+    /// Y tolerance for grouping text-layer tokens into a line, in PDF points.
+    private static let textLineTolerance: CGFloat = 3
+    /// Y tolerance for grouping OCR tokens into a line, in normalised (0..1)
+    /// space. 0.015 ≈ 3pt on a typical invoice height (~792pt).
+    private static let ocrLineTolerance: CGFloat = 0.015
+    /// When matching 金额+税额 pairs against 价税合计, accept a pair whose sum
+    /// is within this many units (rounding tolerance, in 元).
+    private static let sumMatchTolerance: Double = 0.02
 
-            var inv = InvoiceData(fileName: (path as NSString).lastPathComponent)
-            parse(lines: lines, into: &inv)
+    /// Extract from a single PDF. Always returns an `InvoiceData`; on failure
+    /// the result's `errorMessage` explains what went wrong (so the UI can
+    /// distinguish "encrypted" from "OCR found nothing" etc.).
+    static func extract(at path: String) -> InvoiceData {
+        let name = (path as NSString).lastPathComponent
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else {
+            return InvoiceData(fileName: name, errorMessage: "无法打开(文件损坏或不存在)")
+        }
+        if doc.isEncrypted && !doc.unlock(withPassword: "") {
+            return InvoiceData(fileName: name, errorMessage: "PDF 已加密(需要密码)")
+        }
+        if doc.pageCount == 0 {
+            return InvoiceData(fileName: name, errorMessage: "PDF 无页面")
+        }
+
+        // 1) Text-layer path.
+        let lines = buildLines(doc)
+        if !lines.isEmpty {
+            var oriented = lines
+            if needsFlip(oriented) { oriented.reverse() }
+            var inv = InvoiceData(fileName: name)
+            parse(lines: oriented, into: &inv)
             // Only accept the text-layer result if it actually found the key
-            // amounts. If 价税合计 is empty the text layer is unusable
+            // amount. If 价税合计 is empty the text layer is unusable
             // (corrupted/unreadable) — fall through to OCR.
             if !inv.totalWithTax.isEmpty {
                 return inv
             }
         }
 
-        // Fallback: OCR (slow, but rescues PDFs with broken/inverted text).
-        return extractFromOCR(doc: doc, fileName: (path as NSString).lastPathComponent)
+        // 2) OCR fallback (slow, but rescues broken/inverted text PDFs).
+        if let ocrResult = extractFromOCR(doc: doc, fileName: name), !ocrResult.totalWithTax.isEmpty {
+            return ocrResult
+        }
+
+        return InvoiceData(fileName: name, errorMessage: "无法识别(文本层为空且 OCR 无结果)")
     }
 
     /// Build lines from OCR tokens and parse them. Coordinate handling: OCR
@@ -91,54 +118,12 @@ enum InvoiceExtractor {
         let tokens: [Token] = ocrTokens.map {
             Token(x: $0.normX, y: 1.0 - $0.normY, s: $0.s)
         }
-        var sortedTokens = tokens
-
-        // Group into lines by y (tolerance 0.015 in normalised space ≈ 3pt
-        // on a typical invoice height).
-        sortedTokens.sort { (a: Token, b: Token) -> Bool in
-            if abs(a.y - b.y) > 0.015 { return a.y > b.y }
-            return a.x < b.x
-        }
-        var lines: [Line] = []
-        var cur = Line(y: 0, tokens: [])
-        for t in sortedTokens {
-            if cur.tokens.isEmpty || abs(t.y - cur.y) <= 0.015 {
-                if cur.tokens.isEmpty { cur.y = t.y }
-                cur.tokens.append(t)
-            } else {
-                cur.tokens.sort { $0.x < $1.x }
-                lines.append(cur)
-                cur = Line(y: t.y, tokens: [t])
-            }
-        }
-        if !cur.tokens.isEmpty {
-            cur.tokens.sort { $0.x < $1.x }
-            lines.append(cur)
-        }
+        let lines = groupIntoLines(tokens, tolerance: ocrLineTolerance)
         guard !lines.isEmpty else { return nil }
 
         var inv = InvoiceData(fileName: fileName)
         parse(lines: lines, into: &inv)
         return inv
-    }
-
-    /// DEBUG: dump the reconstructed lines + extraction result. For dev use.
-    static func debugExtract(at path: String) {
-        guard let doc = PDFDocument(url: URL(fileURLWithPath: path)) else {
-            print("nil doc"); return
-        }
-        var lines = buildLines(doc)
-        if needsFlip(lines) { lines.reverse() }
-        print("lines (\(lines.count)):")
-        for (i, l) in lines.enumerated() {
-            print("  L\(i) y=\(String(format: "%.1f", l.y)) [\(l.text)]")
-            for t in l.tokens {
-                print("      x=\(String(format: "%.1f", t.x)) «\(t.s)»")
-            }
-        }
-        var inv = InvoiceData(fileName: (path as NSString).lastPathComponent)
-        parse(lines: lines, into: &inv)
-        print("→ type=\(inv.type) totalWithTax=\(inv.totalWithTax) before=\(inv.totalBefore) tax=\(inv.taxAmount)")
     }
 
     static func extractAll(paths: [String]) -> [InvoiceData] {
@@ -149,19 +134,17 @@ enum InvoiceExtractor {
     /// after each file completes with (doneCount, totalCount, currentFileName).
     /// The progress callback lets the UI show "提取中 3/12" while OCR grinds
     /// through a stack of broken PDFs.
+    ///
+    /// Checks `Task.isCancelled` between files so a cancelled extraction
+    /// returns whatever was completed so far rather than continuing.
     static func extractAll(paths: [String],
                            progress: ((Int, Int, String) -> Void)?) -> [InvoiceData] {
         var results: [InvoiceData] = []
         let total = paths.count
         for (i, p) in paths.enumerated() {
+            if Task.isCancelled { break }
             let name = (p as NSString).lastPathComponent
-            if let inv = extract(at: p) {
-                results.append(inv)
-            } else {
-                var fail = InvoiceData(fileName: name)
-                fail.totalWithTax = "失败: 无法读取"
-                results.append(fail)
-            }
+            results.append(extract(at: p))
             progress?(i + 1, total, name)
         }
         return results
@@ -226,14 +209,22 @@ enum InvoiceExtractor {
         // Merge stray ¥ with following digits on the same line.
         tokens = mergeYenTokens(tokens)
 
-        // Sort: by y descending (will flip later if needed), x ascending.
-        tokens.sort { abs($0.y - $1.y) > 3 ? $0.y > $1.y : $0.x < $1.x }
+        return groupIntoLines(tokens, tolerance: textLineTolerance)
+    }
 
-        // Group into lines by y (tolerance 3pt).
+    /// Group pre-sorted tokens into lines by Y (tolerance `tolerance`),
+    /// with tokens sorted by X within each line. Tokens are first sorted by
+    /// Y descending (top of page first, matching PDFKit's flipped coords),
+    /// then X ascending. Shared by the text-layer and OCR paths.
+    private static func groupIntoLines(_ tokens: [Token], tolerance: CGFloat) -> [Line] {
+        let sorted = tokens.sorted { (a: Token, b: Token) -> Bool in
+            if abs(a.y - b.y) > tolerance { return a.y > b.y }
+            return a.x < b.x
+        }
         var lines: [Line] = []
         var cur = Line(y: 0, tokens: [])
-        for t in tokens {
-            if cur.tokens.isEmpty || abs(t.y - cur.y) <= 3 {
+        for t in sorted {
+            if cur.tokens.isEmpty || abs(t.y - cur.y) <= tolerance {
                 if cur.tokens.isEmpty { cur.y = t.y }
                 cur.tokens.append(t)
             } else {
@@ -481,7 +472,7 @@ enum InvoiceExtractor {
             for j in (i + 1)..<n {
                 guard let vi = candidates[i].value, let vj = candidates[j].value else { continue }
                 let err = abs((vi + vj) - target)
-                if err >= 0.02 { continue }   // must round to 价税合计
+                if err >= sumMatchTolerance { continue }   // must round to 价税合计
 
                 let yenCount = (candidates[i].hasYen ? 1 : 0) + (candidates[j].hasYen ? 1 : 0)
                 let taxSmaller = vj <= vi     // 税额 (right col) ≤ 金额 (left col)

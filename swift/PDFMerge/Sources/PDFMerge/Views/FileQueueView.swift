@@ -42,6 +42,20 @@ struct FileQueueView: View {
                     queueList
                 }
             }
+
+            // Duplicate-content warning banner (shown only when present).
+            if state.hasDuplicates {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("检测到 \(state.duplicateIndices.count) 个重复文件(内容相同)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Color.orange.opacity(0.1))
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
         // fileImporter must hang on a stable root view (not a rebuilt child
@@ -67,6 +81,9 @@ struct FileQueueView: View {
 
     private var toolbar: some View {
         VStack(spacing: 6) {
+            // Row 1: import (left) + delete (right) — both touch the queue
+            // membership, grouped at the edges. Remove lives with Clear
+            // because both are destructive.
             HStack(spacing: 6) {
                 Button {
                     isShowingOpenDialog = true
@@ -79,19 +96,20 @@ struct FileQueueView: View {
                     Label("文件夹", systemImage: "folder")
                 }
                 Spacer()
-            }
-            HStack(spacing: 6) {
-                Button("移除") { state.removeSelected() }
+                Button { state.removeSelected() } label: { Label("移除", systemImage: "minus.circle") }
                     .disabled(!hasSelection)
-                Spacer()
+                Button { state.clear() } label: { Label("清空", systemImage: "trash") }
+                    .disabled(state.items.isEmpty)
+            }
+            // Row 2: reorder (sorting only — moves items around, not membership)
+            HStack(spacing: 6) {
                 Button { state.moveUp() } label: { Label("上移", systemImage: "chevron.up") }
                     .disabled(!canMoveUp)
                 Button { state.moveDown() } label: { Label("下移", systemImage: "chevron.down") }
                     .disabled(!canMoveDown)
                 Button { state.sortByName() } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
                     .disabled(state.items.count < 2)
-                Button { state.clear() } label: { Label("清空", systemImage: "trash") }
-                    .disabled(state.items.isEmpty)
+                Spacer()
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
@@ -116,7 +134,7 @@ struct FileQueueView: View {
     private var queueList: some View {
         List(selection: selectionBinding) {
             ForEach(Array(state.items.enumerated()), id: \.element.id) { idx, item in
-                queueRow(item)
+                queueRow(item, isDuplicate: state.duplicateIndices.contains(idx))
                     .tag(idx)
             }
         }
@@ -132,15 +150,24 @@ struct FileQueueView: View {
     }
 
     @ViewBuilder
-    private func queueRow(_ item: FileItem) -> some View {
+    private func queueRow(_ item: FileItem, isDuplicate: Bool) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "doc.text.fill")
-                .foregroundColor(.accentColor)
+            Image(systemName: isDuplicate ? "doc.on.doc.fill" : "doc.text.fill")
+                .foregroundColor(isDuplicate ? .red : .accentColor)
                 .font(.title3)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 4) {
+                    Text(item.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1).truncationMode(.middle)
+                    if isDuplicate {
+                        Text("重复")
+                            .font(.caption2).fontWeight(.medium)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.red, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                }
                 Text("\(Format.size(item.size))  ·  \(item.pageCount) 页")
                     .font(.caption).foregroundStyle(.secondary)
             }

@@ -30,6 +30,10 @@ struct InvoiceDialog: View {
                 TableColumn("价税合计") { Text($0.totalWithTax) }
                 TableColumn("金额(不含税)") { Text($0.totalBefore) }
                 TableColumn("税额") { Text($0.taxAmount) }
+                TableColumn("备注") {
+                    Text($0.errorMessage)
+                        .foregroundStyle($0.failed ? .red : .secondary)
+                }
             }
             .tableStyle(.bordered)
 
@@ -78,19 +82,21 @@ struct InvoiceDialog: View {
 
     // MARK: - Summary
 
-    /// Sum 价税合计 across rows whose total parses as a number. Rows that
-    /// failed extraction (totalWithTax like "失败: ...") are skipped and the
-    /// user is told how many were skipped so the total isn't misleading.
+    /// Sum 价税合计 across rows that aren't failures. Failed rows (those
+    /// with an errorMessage) are skipped and the user is told how many were
+    /// skipped so the total isn't misleading.
     private var summary: (total: Double, counted: Int, skipped: Int) {
         var total = 0.0
         var counted = 0
+        var skipped = 0
         for r in results {
+            if r.failed { skipped += 1; continue }
             if let v = Double(r.totalWithTax) {
                 total += v
                 counted += 1
             }
         }
-        return (total, counted, results.count - counted)
+        return (total, counted, skipped)
     }
 
     private var summaryBar: some View {
@@ -149,6 +155,10 @@ struct DebugTextDialog: View {
 }
 
 /// Lightweight CSV document wrapper for `fileExporter`.
+///
+/// Write-only by design — the app only ever exports CSVs, never imports
+/// them. The read initialiser is required by FileDocument but throws if
+/// ever invoked, so we can't silently corrupt data by pretending to parse.
 struct CSVDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.commaSeparatedText] }
     let rows: [[String]]
@@ -156,9 +166,10 @@ struct CSVDocument: FileDocument {
     init(rows: [[String]]) { self.rows = rows }
 
     init(configuration: ReadConfiguration) throws {
-        let data = configuration.file.regularFileContents ?? Data()
-        let text = String(data: data, encoding: .utf8) ?? ""
-        self.rows = text.split(separator: "\n").map { [$0.description] }
+        // Write-only document — never parsed by this app. Throw rather than
+        // pretend to parse and risk silently mangling data.
+        throw NSError(domain: "PDFMerge.CSVDocument", code: -1,
+                      userInfo: [NSLocalizedDescriptionKey: "CSV 导入不支持"])
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {

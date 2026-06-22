@@ -60,12 +60,23 @@ struct SettingsBar: View {
                     Text(state.extractStatus)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
+                    Button("取消提取") { state.cancelExtraction() }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
+            } else if state.isMerging {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(state.statusText)
+                        .font(.caption)
+                        .foregroundStyle(state.statusText.hasPrefix("错误") ? .red : .secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("取消合并") { state.cancelMerge() }
+                        .buttonStyle(.bordered).controlSize(.small)
                 }
             } else if state.statusVisible {
                 HStack(spacing: 8) {
-                    if state.isMerging {
-                        ProgressView().controlSize(.small)
-                    } else if let v = state.progressValue {
+                    if let v = state.progressValue {
                         ProgressView(value: v).frame(maxWidth: 220)
                     }
                     Text(state.statusText)

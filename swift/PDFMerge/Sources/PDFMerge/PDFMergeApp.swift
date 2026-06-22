@@ -11,14 +11,18 @@ struct PDFMergeApp: App {
             ContentView()
                 .environmentObject(state)
                 .frame(minWidth: 880, minHeight: 560)
-                .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-                    handleDrop(providers)
-                    return true
-                }
                 .alert("提示", isPresented: Binding(
                     get: { state.lastMessage != nil },
                     set: { if !$0 { state.lastMessage = nil } }
                 )) {
+                    // Offer "在 Finder 中显示" only when the message reflects
+                    // a successful merge (we have a last output URL).
+                    if let url = state.lastMergeOutput {
+                        Button("在 Finder 中显示") {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                            state.lastMessage = nil
+                        }
+                    }
                     Button("好") { state.lastMessage = nil }
                 } message: {
                     Text(state.lastMessage ?? "")
@@ -32,6 +36,35 @@ struct PDFMergeApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
         .defaultSize(width: 1080, height: 680)
+    }
+}
+
+/// Main layout: HSplit(left queue 42% / right preview) with bottom settings bar.
+/// Owns the drop target so the highlight overlay can react to it.
+/// Mirrors Go's HSplit(0.42) + Border(settings at bottom).
+struct ContentView: View {
+    @EnvironmentObject var state: AppState
+    @State private var isDropTargeted = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HSplitView {
+                FileQueueView(state: state)
+                PreviewPanel(state: state)
+            }
+            SettingsBar(state: state)
+        }
+        // Drop zone spans the whole content; highlight while dragging PDFs in.
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+            return true
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.accentColor.opacity(isDropTargeted ? 0.8 : 0), lineWidth: 3)
+                .padding(2)
+                .allowsHitTesting(false)
+        )
     }
 
     /// Drag-and-drop PDF files. Mirrors Go `Window.SetOnDropped`.
@@ -51,22 +84,6 @@ struct PDFMergeApp: App {
             if !paths.isEmpty {
                 state.addFiles(paths)
             }
-        }
-    }
-}
-
-/// Main layout: HSplit(left queue 42% / right preview) with bottom settings bar.
-/// Mirrors Go's HSplit(0.42) + Border(settings at bottom).
-struct ContentView: View {
-    @EnvironmentObject var state: AppState
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HSplitView {
-                FileQueueView(state: state)
-                PreviewPanel(state: state)
-            }
-            SettingsBar(state: state)
         }
     }
 }

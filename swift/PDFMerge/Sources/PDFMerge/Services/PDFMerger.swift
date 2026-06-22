@@ -29,6 +29,9 @@ enum PDFMerger {
         var skipped: [String] = []
 
         for path in inputPaths {
+            // Cooperative cancellation: a cancelled Task aborts here instead
+            // of grinding through the whole queue.
+            try Task.checkCancellation()
             guard let doc = PDFDocument(url: URL(fileURLWithPath: path)),
                   doc.pageCount > 0 else {
                 skipped.append((path as NSString).lastPathComponent)
@@ -56,7 +59,10 @@ enum PDFMerger {
         guard out.write(to: tmpURL) else {
             throw MergeFailure(message: "写入 PDF 失败: \(outputPath)")
         }
-        try FileManager.default.removeItem(at: outURL) // ignore failure if not present
+        // Remove any pre-existing output file first. `try?` because on a
+        // first-time merge the output won't exist yet — a plain `try`
+        // would throw NSFileNoSuchFileError and abort the whole merge.
+        try? FileManager.default.removeItem(at: outURL)
         try FileManager.default.moveItem(at: tmpURL, to: outURL)
 
         return (insertIndex, skipped)
