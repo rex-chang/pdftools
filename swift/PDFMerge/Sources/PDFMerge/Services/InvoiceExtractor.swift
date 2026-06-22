@@ -325,15 +325,20 @@ enum InvoiceExtractor {
             if let t = extractType(in: line.text), !t.isEmpty {
                 typeCandidate = t
             }
-            // Identify the 合计 line (not 价税合计).
+            // Identify the 合计 line. Cases this must handle:
+            //  - "合 计 ¥a ¥b"  (合/计 separated by a space)
+            //  - "合 ¥a 计 ¥b"  (合/计 split across columns by amounts)
+            //  - "...合计¥a¥b价税合计（大写）..."  (合计 AND 价税合计 merged
+            //    into one line by Y-grouping — common when the two rows are
+            //    vertically close). The old `!contains("价税合计")` guard
+            //    wrongly rejected this whole line, losing the 合计 amounts.
             //
-            // "合" and "计" can be split across the 金额 and 税额 column
-            // headers — e.g. "2000.00 不征税 合 ¥2000.00 计 ¥0.00" — so a
-            // naive "contains 合计" misses it. Match if both chars appear on
-            // the line, but exclude the 价税合计 label line.
-            if !line.compact.contains("价税合计"),
-               line.compact.range(of: "合.*计", options: .regularExpression) != nil
-                || line.compact.contains("合计") {
+            // New rule: a line is the 合计 line if it contains 合 and 计
+            // (in either order, possibly far apart) AND has at least one
+            // ¥-amount candidate. The 价税合计-only line has no ¥ on itself
+            // (its amount is on a neighbour), so this naturally excludes it.
+            if line.compact.contains("合") && line.compact.contains("计")
+                && !amountCandidates(in: line).isEmpty {
                 if totalLineIdx == nil { totalLineIdx = i }
             }
         }
@@ -348,6 +353,16 @@ enum InvoiceExtractor {
         // Resolved BEFORE 金额/税额 so the latter can use it as a constraint.
         for (i, line) in lines.enumerated() where line.text.contains("价税合计") {
             var amt = yenAmounts(in: line)
+            // If the keyword line has a stray "¥" token but no ¥-prefixed
+            // amount, the number is likely sitting on a nearby line whose
+            // Y differed slightly (PDF baseline jitter splits ¥ and digits
+            // into separate lines). Scan a wider neighbourhood for the
+            // closest bare decimal to the ¥'s x position.
+            if amt.isEmpty && hasStrayYen(in: line) {
+                if let picked = nearestBareAmountToYen(in: lines, around: i) {
+                    amt = [picked]
+                }
+            }
             if amt.isEmpty {
                 let neighbours = [i - 1, i + 1, i - 2, i + 2].filter { $0 >= 0 && $0 < lines.count }
                 for j in neighbours {
@@ -398,6 +413,68 @@ enum InvoiceExtractor {
                 inv.totalBefore = candidates[0].amount
             }
         }
+
+        // 4) Sanity check: 价税合计 must be ≥ both 金额 and 税额 (it's their
+        //    sum, so it can't be smaller than either). When the 价税合计 line
+        //    had a stray ¥ next to a leftover tax-amount from the 合计 row
+        //    (a common Y-jitter artifact), we'll have picked that small tax
+        //    value as the grand total. Detect and replace with the largest
+        //    ¥-amount on the page, which for a sane invoice IS the grand total.
+        reconcileTotalWithTax(lines: lines, into: &inv)
+    }
+
+    /// If `totalWithTax` is missing or implausibly small (< 金额 or < 税额),
+    /// replace it with the largest ¥-amount on the page. The grand total is
+    /// always the biggest single ¥ value on an invoice, so this is a safe
+    /// fallback when the keyword-line extraction grabbed the wrong number.
+    private static func reconcileTotalWithTax(lines: [Line], into inv: inout InvoiceData) {
+        let before = Double(inv.totalBefore) ?? 0
+        let tax = Double(inv.taxAmount) ?? 0
+        let current = Double(inv.totalWithTax) ?? 0
+        let plausible = current >= before && current >= tax && current > 0
+        if plausible { return }
+
+        // Expected grand total = 金额 + 税额 (within rounding). Use it to
+        // guide the search: the right candidate should match this sum.
+        let expected = before + tax
+
+        // Pass 1: largest ¥-tagged amount anywhere on the page.
+        var bestYen: Double = -1
+        var bestYenStr = ""
+        for line in lines {
+            for t in line.tokens where t.s.hasPrefix("¥") {
+                let rest = String(t.s.dropFirst()).replacingOccurrences(of: ",", with: "")
+                if let amt = leadingAmount(in: rest), let v = Double(amt), v > bestYen {
+                    bestYen = v
+                    bestYenStr = amt
+                }
+            }
+        }
+
+        // Pass 2: a bare decimal matching the expected sum (handles the
+        // "¥ 218.60" case where ¥ and digits were split by Y-jitter, so the
+        // grand total exists only as a bare number on the page).
+        var bestBareMatch: Double = -1
+        var bestBareMatchStr = ""
+        if expected > 0 {
+            for line in lines {
+                for t in line.tokens where !t.s.hasPrefix("¥") {
+                    guard let amt = leadingAmount(in: t.s), let v = Double(amt) else { continue }
+                    if abs(v - expected) < 0.5 && v > bestBareMatch {
+                        bestBareMatch = v
+                        bestBareMatchStr = amt
+                    }
+                }
+            }
+        }
+
+        // Prefer the bare amount that matches 金额+税额 (most reliable signal);
+        // otherwise fall back to the largest ¥-tagged amount.
+        if !bestBareMatchStr.isEmpty {
+            inv.totalWithTax = bestBareMatchStr
+        } else if !bestYenStr.isEmpty {
+            inv.totalWithTax = bestYenStr
+        }
     }
 
     /// All ¥-prefixed amounts on a line, in x order. Returns ["2000.00", "0.00"]
@@ -411,6 +488,48 @@ enum InvoiceExtractor {
             }
         }
         return out
+    }
+
+    /// True if the line has a lone "¥" token not followed by digits on the
+    /// same line — i.e. the amount symbol is present but its number was
+    /// split onto another line by Y-jitter.
+    private static func hasStrayYen(in line: Line) -> Bool {
+        line.tokens.contains { $0.s == "¥" }
+    }
+
+    /// When a stray "¥" sits on the 价税合计 line but its digits landed on a
+    /// different line (Y-jitter), search nearby lines for the bare decimal
+    /// closest in x to the ¥ symbol and return it. Considers lines within
+    /// ±3 indices and picks the candidate with the smallest x-distance to
+    /// any "¥" on the anchor line.
+    private static func nearestBareAmountToYen(in lines: [Line], around anchorIdx: Int) -> String? {
+        let anchor = lines[anchorIdx]
+        let yenXs = anchor.tokens.filter { $0.s == "¥" }.map(\.x)
+        guard !yenXs.isEmpty else { return nil }
+
+        var best: (dist: CGFloat, value: String)? = nil
+        for offset in [-1, 1, -2, 2, -3, 3] {
+            let j = anchorIdx + offset
+            guard j >= 0, j < lines.count else { continue }
+            for t in lines[j].tokens {
+                // Skip ¥-tagged amounts (handled elsewhere) and non-amounts.
+                if t.s.hasPrefix("¥") { continue }
+                guard let amt = leadingAmount(in: t.s), amt != "0", amt != "0.0", amt != "0.00" else { continue }
+                // Distance to the nearest ¥ on the anchor line.
+                let dist = yenXs.map { abs($0 - t.x) }.min() ?? .greatestFiniteMagnitude
+                if best == nil || dist < best!.dist {
+                    best = (dist, amt)
+                }
+            }
+        }
+        // Only accept if reasonably close in x (within 120pt). A ¥ symbol
+        // and its number can be on opposite sides of a "（小写）" label in
+        // some templates, hence the generous threshold; tighter would miss
+        // real pairs.
+        if let b = best, b.dist <= 120 {
+            return b.value
+        }
+        return nil
     }
 
     /// An amount found on a line, with its x position and whether it carried ¥.
