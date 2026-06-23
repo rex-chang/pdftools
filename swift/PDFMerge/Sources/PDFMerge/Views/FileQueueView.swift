@@ -7,15 +7,15 @@ struct FileQueueView: View {
     @ObservedObject var state: AppState
 
     private var hasSelection: Bool {
-        if let i = state.selectedIndex, state.items.indices.contains(i) { return true }
+        if let i = state.fileQueue.selectedIndex, state.fileQueue.items.indices.contains(i) { return true }
         return false
     }
     private var canMoveUp: Bool {
-        if let i = state.selectedIndex { return i > 0 }
+        if let i = state.fileQueue.selectedIndex { return i > 0 }
         return false
     }
     private var canMoveDown: Bool {
-        if let i = state.selectedIndex { return i < state.items.count - 1 }
+        if let i = state.fileQueue.selectedIndex { return i < state.fileQueue.items.count - 1 }
         return false
     }
 
@@ -36,7 +36,7 @@ struct FileQueueView: View {
 
             // List + empty state overlay (mirrors NewStack(List, EmptyState))
             ZStack {
-                if state.items.isEmpty {
+                if state.fileQueue.items.isEmpty {
                     emptyState
                 } else {
                     queueList
@@ -44,12 +44,12 @@ struct FileQueueView: View {
             }
 
             // Duplicate-content warning banner (shown only when present).
-            if state.hasDuplicates {
+            if state.fileQueue.hasDuplicates {
                 Divider()
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
-                    Text("检测到 \(state.duplicateIndices.count) 个重复文件(内容相同)")
+                    Text("检测到 \(state.fileQueue.duplicateIndices.count) 个重复文件(内容相同)")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -65,7 +65,7 @@ struct FileQueueView: View {
                       allowedContentTypes: [UTType.pdf],
                       allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
-                state.addFiles(urls.map(\.path))
+                state.fileQueue.addFiles(urls.map(\.path))
             }
         }
         .fileImporter(isPresented: $isShowingFolderDialog,
@@ -96,19 +96,19 @@ struct FileQueueView: View {
                     Label("文件夹", systemImage: "folder")
                 }
                 Spacer()
-                Button { state.removeSelected() } label: { Label("移除", systemImage: "minus.circle") }
+                Button { state.fileQueue.removeSelected() } label: { Label("移除", systemImage: "minus.circle") }
                     .disabled(!hasSelection)
-                Button { state.clear() } label: { Label("清空", systemImage: "trash") }
-                    .disabled(state.items.isEmpty)
+                Button { state.fileQueue.clear() } label: { Label("清空", systemImage: "trash") }
+                    .disabled(state.fileQueue.items.isEmpty)
             }
             // Row 2: reorder (sorting only — moves items around, not membership)
             HStack(spacing: 6) {
-                Button { state.moveUp() } label: { Label("上移", systemImage: "chevron.up") }
+                Button { state.fileQueue.moveUp() } label: { Label("上移", systemImage: "chevron.up") }
                     .disabled(!canMoveUp)
-                Button { state.moveDown() } label: { Label("下移", systemImage: "chevron.down") }
+                Button { state.fileQueue.moveDown() } label: { Label("下移", systemImage: "chevron.down") }
                     .disabled(!canMoveDown)
-                Button { state.sortByName() } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
-                    .disabled(state.items.count < 2)
+                Button { state.fileQueue.sortByName() } label: { Label("排序", systemImage: "arrow.up.arrow.down") }
+                    .disabled(state.fileQueue.items.count < 2)
                 Spacer()
             }
         }
@@ -126,15 +126,15 @@ struct FileQueueView: View {
         let paths = entries
             .filter { Format.isPDF($0) }
             .map { (dir as NSString).appendingPathComponent($0) }
-        state.addFiles(paths)
+        state.fileQueue.addFiles(paths)
     }
 
     // MARK: List
 
     private var queueList: some View {
         List(selection: selectionBinding) {
-            ForEach(Array(state.items.enumerated()), id: \.element.id) { idx, item in
-                queueRow(item, isDuplicate: state.duplicateIndices.contains(idx))
+            ForEach(Array(state.fileQueue.items.enumerated()), id: \.element.id) { idx, item in
+                queueRow(item, isDuplicate: state.fileQueue.duplicateIndices.contains(idx))
                     .tag(idx)
             }
         }
@@ -144,8 +144,8 @@ struct FileQueueView: View {
     /// Drive the List's selection from AppState.selectedIndex (single selection).
     private var selectionBinding: Binding<Int?> {
         Binding(
-            get: { state.selectedIndex },
-            set: { state.selectedIndex = $0 }
+            get: { state.fileQueue.selectedIndex },
+            set: { state.fileQueue.selectedIndex = $0 }
         )
     }
 

@@ -11,7 +11,7 @@ struct PreviewPanel: View {
             header
             Divider()
 
-            if let item = state.selectedItem {
+            if let item = state.fileQueue.selectedItem {
                 previewContent(for: item)
             } else {
                 placeholder
@@ -26,7 +26,7 @@ struct PreviewPanel: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("预览").font(.headline)
-            if let item = state.selectedItem {
+            if let item = state.fileQueue.selectedItem {
                 Text(item.name)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

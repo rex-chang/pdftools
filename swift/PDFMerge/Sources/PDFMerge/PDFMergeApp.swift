@@ -12,26 +12,32 @@ struct PDFMergeApp: App {
                 .environmentObject(state)
                 .frame(minWidth: 880, minHeight: 560)
                 .alert("提示", isPresented: Binding(
-                    get: { state.lastMessage != nil },
-                    set: { if !$0 { state.lastMessage = nil } }
+                    get: { state.merge.lastMessage != nil },
+                    set: { if !$0 { state.merge.lastMessage = nil } }
                 )) {
                     // Offer "在 Finder 中显示" only when the message reflects
                     // a successful merge (we have a last output URL).
-                    if let url = state.lastMergeOutput {
+                    if let url = state.merge.lastMergeOutput {
                         Button("在 Finder 中显示") {
                             NSWorkspace.shared.activateFileViewerSelecting([url])
-                            state.lastMessage = nil
+                            state.merge.lastMessage = nil
                         }
                     }
-                    Button("好") { state.lastMessage = nil }
+                    Button("好") { state.merge.lastMessage = nil }
                 } message: {
-                    Text(state.lastMessage ?? "")
+                    Text(state.merge.lastMessage ?? "")
                 }
-                .sheet(isPresented: $state.showInvoiceDialog) {
-                    InvoiceDialog(results: state.invoiceResults,
-                                  paths: state.invoiceInputPathsForDialog,
-                                  fetchDebugText: { state.debugText(for: $0) },
-                                  isPresented: $state.showInvoiceDialog)
+                .sheet(isPresented: Binding(
+                    get: { state.invoice.showInvoiceDialog },
+                    set: { state.invoice.showInvoiceDialog = $0 }
+                )) {
+                    InvoiceDialog(results: state.invoice.invoiceResults,
+                                  paths: state.invoice.invoiceInputPaths,
+                                  fetchDebugText: { state.invoice.debugText(for: $0) },
+                                  isPresented: Binding(
+                                      get: { state.invoice.showInvoiceDialog },
+                                      set: { state.invoice.showInvoiceDialog = $0 }
+                                  ))
                 }
         }
         .windowStyle(.titleBar)
@@ -89,7 +95,7 @@ struct ContentView: View {
                     }
                     remaining -= 1
                     if remaining == 0, !collected.isEmpty {
-                        state.addFiles(collected)
+                        state.fileQueue.addFiles(collected)
                     }
                 }
             }

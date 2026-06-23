@@ -3,9 +3,23 @@ import UniformTypeIdentifiers
 
 /// Bottom bar: output settings + merge/extract buttons + progress.
 /// Mirrors Go `ui/settings.go`.
+///
+/// Spans all three stores: merge settings + status come from `merge`,
+/// extraction status from `invoice`, and the file count that gates the
+/// buttons from `fileQueue`.
 struct SettingsBar: View {
     @ObservedObject var state: AppState
     @State private var isShowingDirPicker = false
+
+    private var fileQueue: FileQueueStore { state.fileQueue }
+    @ObservedObject private var merge: MergeStore
+    @ObservedObject private var invoice: InvoiceStore
+
+    init(state: AppState) {
+        self.state = state
+        self._merge = ObservedObject(wrappedValue: state.merge)
+        self._invoice = ObservedObject(wrappedValue: state.invoice)
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -16,7 +30,7 @@ struct SettingsBar: View {
                 // Directory row
                 HStack(spacing: 6) {
                     Text("目录:").foregroundStyle(.secondary)
-                    TextField("目录", text: $state.outputDir)
+                    TextField("目录", text: $merge.outputDir)
                         .textFieldStyle(.roundedBorder)
                         .disabled(true)
                     Button { isShowingDirPicker = true } label: {
@@ -27,7 +41,7 @@ struct SettingsBar: View {
                 // Filename row
                 HStack(spacing: 6) {
                     Text("文件名:").foregroundStyle(.secondary)
-                    TextField("文件名", text: $state.outputName)
+                    TextField("文件名", text: $merge.outputName)
                         .textFieldStyle(.roundedBorder)
                         .frame(minWidth: 180)
                 }
@@ -37,51 +51,51 @@ struct SettingsBar: View {
                 // Actions
                 HStack(spacing: 8) {
                     Button {
-                        state.extractInvoices()
+                        invoice.extractInvoices()
                     } label: {
                         Label("提取价税", systemImage: "magnifyingglass")
                     }
-                    .disabled(!state.canExtract)
+                    .disabled(!invoice.canExtract)
 
                     Button {
-                        state.merge()
+                        merge.merge()
                     } label: {
                         Label("合并 PDF", systemImage: "square.and.arrow.down.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!state.canMerge)
+                    .disabled(!merge.canMerge)
                 }
             }
 
             // Status + progress (mirrors StatusLabel + ProgressBar/ProgressInfinite)
-            if state.isExtracting {
+            if invoice.isExtracting {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(state.extractStatus)
+                    Text(invoice.extractStatus)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
-                    Button("取消提取") { state.cancelExtraction() }
+                    Button("取消提取") { invoice.cancelExtraction() }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
-            } else if state.isMerging {
+            } else if merge.isMerging {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(state.statusText)
+                    Text(merge.statusText)
                         .font(.caption)
-                        .foregroundStyle(state.statusText.hasPrefix("错误") ? .red : .secondary)
+                        .foregroundStyle(merge.statusText.hasPrefix("错误") ? .red : .secondary)
                         .lineLimit(2)
                     Spacer()
-                    Button("取消合并") { state.cancelMerge() }
+                    Button("取消合并") { merge.cancelMerge() }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
-            } else if state.statusVisible {
+            } else if merge.statusVisible {
                 HStack(spacing: 8) {
-                    if let v = state.progressValue {
+                    if let v = merge.progressValue {
                         ProgressView(value: v).frame(maxWidth: 220)
                     }
-                    Text(state.statusText)
+                    Text(merge.statusText)
                         .font(.caption)
-                        .foregroundStyle(state.statusText.hasPrefix("错误") ? .red : .secondary)
+                        .foregroundStyle(merge.statusText.hasPrefix("错误") ? .red : .secondary)
                         .lineLimit(2)
                     Spacer()
                 }
@@ -93,7 +107,7 @@ struct SettingsBar: View {
                       allowedContentTypes: [UTType.folder],
                       allowsMultipleSelection: false) { result in
             if case let .success(urls) = result, let url = urls.first {
-                state.outputDir = url.path
+                merge.outputDir = url.path
             }
         }
     }
