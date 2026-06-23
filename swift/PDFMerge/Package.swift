@@ -11,5 +11,10 @@ let package = Package(
             name: "PDFMerge",
             path: "Sources/PDFMerge"
         ),
+        .testTarget(
+            name: "PDFMergeTests",
+            dependencies: ["PDFMerge"],
+            path: "Tests/PDFMergeTests"
+        ),
     ]
 )

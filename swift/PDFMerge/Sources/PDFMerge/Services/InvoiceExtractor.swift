@@ -1,29 +1,6 @@
 import Foundation
 import PDFKit
 
-/// Invoice price/tax data. Mirrors Go `pdf.InvoiceData`.
-struct InvoiceData: Identifiable {
-    let id = UUID()
-    let fileName: String
-    var type: String = ""   // 类型
-    var totalWithTax: String = ""   // 价税合计
-    var totalBefore: String = ""    // 金额(不含税)
-    var taxAmount: String = ""      // 税额
-    /// Populated only when extraction failed. Surfaced in the UI so the
-    /// user knows *why* a row is empty (encrypted? OCR found nothing?).
-    var errorMessage: String = ""
-
-    /// True when extraction produced no usable totals (either failed or
-    /// genuinely empty). Used to drive summary-bar accounting.
-    var failed: Bool { !errorMessage.isEmpty }
-
-    static let csvHeader = ["文件名", "类型", "价税合计", "金额(不含税)", "税额", "备注"]
-
-    var csvRow: [String] {
-        [fileName, type, totalWithTax, totalBefore, taxAmount, errorMessage]
-    }
-}
-
 /// Extract invoice price/tax info from Chinese electronic invoices (电子发票).
 ///
 /// Strategy: these invoices share a stable layout — a table with columns
@@ -158,12 +135,12 @@ enum InvoiceExtractor {
 
     // MARK: - Tokenising
 
-    private struct Token {
+    struct Token {
         let x: CGFloat
         let y: CGFloat
         var s: String
     }
-    private struct Line {
+    struct Line {
         var y: CGFloat
         var tokens: [Token]
         /// Concatenated text (no spaces between tokens).
@@ -216,7 +193,7 @@ enum InvoiceExtractor {
     /// with tokens sorted by X within each line. Tokens are first sorted by
     /// Y descending (top of page first, matching PDFKit's flipped coords),
     /// then X ascending. Shared by the text-layer and OCR paths.
-    private static func groupIntoLines(_ tokens: [Token], tolerance: CGFloat) -> [Line] {
+    static func groupIntoLines(_ tokens: [Token], tolerance: CGFloat) -> [Line] {
         let sorted = tokens.sorted { (a: Token, b: Token) -> Bool in
             if abs(a.y - b.y) > tolerance { return a.y > b.y }
             return a.x < b.x
@@ -284,11 +261,11 @@ enum InvoiceExtractor {
     }
 
     /// If `s` starts with a decimal number, return it; else nil.
-    private static let leadingAmountRegex: NSRegularExpression = {
+    static let leadingAmountRegex: NSRegularExpression = {
         try! NSRegularExpression(pattern: "^-?[\\d,]+(?:\\.\\d+)?")
     }()
 
-    private static func leadingAmount(in s: String) -> String? {
+    static func leadingAmount(in s: String) -> String? {
         let ns = s as NSString
         guard let m = leadingAmountRegex.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)),
               m.range.length > 0 else { return nil }
@@ -314,7 +291,7 @@ enum InvoiceExtractor {
 
     // MARK: - Parsing
 
-    private static func parse(lines: [Line], into inv: inout InvoiceData) {
+    static func parse(lines: [Line], into inv: inout InvoiceData) {
         // 1) Type: scan for *star-wrapped* goods name(s). Take the LAST one
         //    before the 合计 line (closest to the actual totals). Go only
         //    took the first match, which dropped the second half of names
@@ -479,7 +456,7 @@ enum InvoiceExtractor {
 
     /// All ¥-prefixed amounts on a line, in x order. Returns ["2000.00", "0.00"]
     /// for "¥2000.00 ¥0.00".
-    private static func yenAmounts(in line: Line) -> [String] {
+    static func yenAmounts(in line: Line) -> [String] {
         var out: [String] = []
         for t in line.tokens {
             if t.s.hasPrefix("¥") {
@@ -533,7 +510,7 @@ enum InvoiceExtractor {
     }
 
     /// An amount found on a line, with its x position and whether it carried ¥.
-    private struct AmountCandidate {
+    struct AmountCandidate {
         let x: CGFloat
         let amount: String
         let hasYen: Bool
@@ -543,7 +520,7 @@ enum InvoiceExtractor {
     /// Every decimal amount on a line in x order — both ¥-prefixed and bare.
     /// Bare candidates skip tax-rate tokens like "6%", "3%", "0.06" and the
     /// literal "0". ¥-tagged candidates are always kept.
-    private static func amountCandidates(in line: Line) -> [AmountCandidate] {
+    static func amountCandidates(in line: Line) -> [AmountCandidate] {
         var out: [AmountCandidate] = []
         for t in line.tokens {
             if t.s.hasPrefix("¥") {
@@ -571,7 +548,7 @@ enum InvoiceExtractor {
     /// 2. Tie-break by smaller numerical error, then by the pair whose 税额
     ///    (right member) is the smaller of the two (税额 < 金额 in practice).
     /// 3. If 价税合计 is unknown, take the rightmost two by x.
-    private static func pickAmountPair(_ candidates: [AmountCandidate],
+    static func pickAmountPair(_ candidates: [AmountCandidate],
                                        totalWithTax: String) -> (String, String) {
         let target = Double(totalWithTax)
         let n = candidates.count
@@ -616,13 +593,13 @@ enum InvoiceExtractor {
 
     /// Extract the goods type wrapped in *stars*. Returns the FULL matched
     /// span (e.g. "*生产生活服务*餐费"), with stars trimmed.
-    private static let typeRegex: NSRegularExpression = {
+    static let typeRegex: NSRegularExpression = {
         // One or more *delimited* segments glued together:
         //   *餐饮服务*餐饮服务  /  *生产生活服务*餐费  /  *预付卡销售*预付卡
         try! NSRegularExpression(pattern: "(?:\\*[^*]+\\*)+")
     }()
 
-    private static func extractType(in text: String) -> String? {
+    static func extractType(in text: String) -> String? {
         let ns = text as NSString
         guard let m = typeRegex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else {
             return nil
